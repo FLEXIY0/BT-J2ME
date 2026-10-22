@@ -5,10 +5,16 @@
 #include <string.h>
 
 #include "font_big.h"
+#include "font_large.h"
+#include "font_largeb.h"
+#include "font_mid.h"
 #include "font_small.h"
 
-const Font font_small = { FONT_SMALL_W, FONT_SMALL_H, FONT_SMALL_COUNT, font_small_cps, font_small_bits };
-const Font font_big   = { FONT_BIG_W, FONT_BIG_H, FONT_BIG_COUNT, font_big_cps, font_big_bits };
+const Font font_small  = { FONT_SMALL_W, FONT_SMALL_H, FONT_SMALL_COUNT, font_small_cps, font_small_bits };
+const Font font_big    = { FONT_BIG_W, FONT_BIG_H, FONT_BIG_COUNT, font_big_cps, font_big_bits };
+const Font font_mid    = { FONT_MID_W, FONT_MID_H, FONT_MID_COUNT, font_mid_cps, font_mid_bits };
+const Font font_large  = { FONT_LARGE_W, FONT_LARGE_H, FONT_LARGE_COUNT, font_large_cps, font_large_bits };
+const Font font_largeb = { FONT_LARGEB_W, FONT_LARGEB_H, FONT_LARGEB_COUNT, font_largeb_cps, font_largeb_bits };
 
 Image image_new(int w, int h)
 {
@@ -213,6 +219,13 @@ static int glyph_index(const Font *f, unsigned cp)
             hi = mid - 1;
     }
     return cp == '?' ? -1 : glyph_index(f, '?');
+}
+
+const uint8_t *gfx_glyph(const Font *f, unsigned cp)
+{
+    int gi = glyph_index(f, cp);
+
+    return gi < 0 ? NULL : f->bits + (size_t)gi * (size_t)f->h * (size_t)((f->w + 7) / 8);
 }
 
 int gfx_text_width(const Font *f, const char *s, int scale)

@@ -29,7 +29,8 @@ override LDFLAGS += -static
 endif
 
 SRC := src/main.c src/jar.c src/manifest.c src/classfile.c src/png.c src/gfx.c \
-       src/library.c src/launcher.c src/platform_$(BACKEND).c
+       src/library.c src/launcher.c src/platform_$(BACKEND).c \
+       src/jvm_core.c src/jvm_interp.c src/jvm_lib.c src/rt.c src/midp.c
 OBJ := $(SRC:.c=.o)
 
 bt-j2me: $(OBJ)

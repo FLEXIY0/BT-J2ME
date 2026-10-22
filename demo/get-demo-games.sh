@@ -18,9 +18,10 @@ fetch sudoku.zip    "$SF/freecell/SudokuMe/SudokuME%20V1.32/Sudoku_bin.zip"
 fetch tetris.zip    "$SF/mobitetris/mobitetris/mobitetris-0.0.2/mobitetris-0.0.2.zip"
 
 cp "$TMP/jtReversi.jar" "$DEST/"
-unzip -o -j -q "$TMP/freecell.zip" Freecell.jar -d "$DEST"
-unzip -o -j -q "$TMP/sudoku.zip" Sudoku.jar -d "$DEST"
-unzip -o -j -q "$TMP/tetris.zip" mobitetris-0.0.2/bin/Tetris.jar -d "$DEST"
+# JAD нужен: в нём бывают свойства, без которых игра не запускается (SudokuME-Debug)
+unzip -o -j -q "$TMP/freecell.zip" Freecell.jar Freecell.jad -d "$DEST"
+unzip -o -j -q "$TMP/sudoku.zip" Sudoku.jar Sudoku.jad -d "$DEST"
+unzip -o -j -q "$TMP/tetris.zip" mobitetris-0.0.2/bin/Tetris.jar mobitetris-0.0.2/bin/Tetris.jad -d "$DEST"
 cp "$HERE"/covers/*.png "$DEST/covers/"
 
 echo "Готово: $DEST"

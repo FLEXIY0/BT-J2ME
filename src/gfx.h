@@ -18,6 +18,12 @@ typedef struct {
 
 extern const Font font_small;   /* 6x12 */
 extern const Font font_big;     /* 8x16, жирный */
+extern const Font font_mid;     /* 8x16 — средний шрифт игр */
+extern const Font font_large;   /* 10x20 */
+extern const Font font_largeb;  /* 10x20, жирный */
+
+/* Строки глифа ((w+7)/8 байт на строку) или NULL; неизвестные символы заменяются на '?'. */
+const uint8_t *gfx_glyph(const Font *f, unsigned cp);
 
 Image image_new(int w, int h);
 void  image_free(Image *img);

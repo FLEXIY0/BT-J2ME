@@ -43,19 +43,35 @@ static const uint8_t *find_eocd(const uint8_t *data, size_t size)
     return NULL;
 }
 
+static int parse_dir(Jar *jar, const char *path);
+
 int jar_open(Jar *jar, const char *path)
 {
-    const uint8_t *eocd, *p, *end;
-    uint32_t cd_off, cd_size;
-    uint16_t total;
-    size_t i;
-
     memset(jar, 0, sizeof(*jar));
     jar->data = read_file(path, &jar->size);
     if (!jar->data) {
         BT_LOG("не удалось прочитать %s\n", path);
         return -1;
     }
+    return parse_dir(jar, path);
+}
+
+int jar_open_mem(Jar *jar, const uint8_t *data, size_t size)
+{
+    memset(jar, 0, sizeof(*jar));
+    jar->data = (uint8_t *)data;
+    jar->size = size;
+    jar->borrowed = 1;
+    return parse_dir(jar, "<встроенный>");
+}
+
+static int parse_dir(Jar *jar, const char *path)
+{
+    const uint8_t *eocd, *p, *end;
+    uint32_t cd_off, cd_size;
+    uint16_t total;
+    size_t i;
+
     eocd = find_eocd(jar->data, jar->size);
     if (!eocd) {
         BT_LOG("%s: не ZIP/JAR архив\n", path);
@@ -114,7 +130,8 @@ void jar_close(Jar *jar)
     for (i = 0; i < jar->count; i++)
         free(jar->entries[i].name);
     free(jar->entries);
-    free(jar->data);
+    if (!jar->borrowed)
+        free(jar->data);
     memset(jar, 0, sizeof(*jar));
 }
 

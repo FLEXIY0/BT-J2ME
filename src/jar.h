@@ -18,9 +18,12 @@ typedef struct {
     size_t    size;
     JarEntry *entries;
     size_t    count;
+    int       borrowed;     /* data принадлежит не нам */
 } Jar;
 
 int  jar_open(Jar *jar, const char *path);
+/* То же для архива в памяти (встроенная библиотека): данные не копируются и не освобождаются. */
+int  jar_open_mem(Jar *jar, const uint8_t *data, size_t size);
 void jar_close(Jar *jar);
 
 /* Поиск записи по точному имени (например "META-INF/MANIFEST.MF"). */

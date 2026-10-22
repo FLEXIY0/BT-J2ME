@@ -1,6 +1,9 @@
 #include "classfile.h"
 #include "jar.h"
+#include "jvm.h"
 #include "launcher.h"
+#include "midp.h"
+#include "rt.h"
 #include "manifest.h"
 #include "platform.h"
 #include "util.h"
@@ -23,14 +26,15 @@ static void usage(void)
         "  bt-j2me [папка] [опции]          меню-полка с играми (по умолчанию\n"
         "                                   $BT_J2ME_GAMES или ~/.local/share/bt-j2me/games)\n"
         "  bt-j2me info <игра.jar>          сведения о MIDlet и проверка классов\n"
-        "  bt-j2me run <игра.jar> [опции]   запуск (интерпретатор — этап 2 дорожной карты)\n"
+        "  bt-j2me run <игра.jar> [опции]   запустить игру сразу, без меню\n"
         "  bt-j2me display-test [опции]     проверка экрана и клавиш\n\n"
         "Опции:\n"
         "  -s WxH        виртуальный экран (по умолчанию 240x320)\n"
         "  --windowed    в окне вместо полного экрана\n"
         "  --smooth      дробное масштабирование (по умолчанию — авто)\n"
         "  --sharp       только целое масштабирование\n"
-        "  --soft        программный рендер для старых видеокарт\n");
+        "  --gpu         рисовать через видеокарту (OpenGL); по умолчанию — программно,\n"
+        "                это легче по памяти и надёжнее на старых ПК\n");
 }
 
 static int cmd_info(const char *path)
@@ -193,11 +197,44 @@ static int parse_opts(int argc, char **argv, int start, PlatformConfig *cfg)
             cfg->scale = SCALE_INTEGER;
         } else if (strcmp(argv[i], "--soft") == 0) {
             cfg->software = 1;
+        } else if (strcmp(argv[i], "--gpu") == 0) {
+            cfg->software = 0;
         } else {
             BT_LOG("неизвестная опция: %s\n", argv[i]);
             return -1;
         }
     }
+    return 0;
+}
+
+/* Служебное: запуск cls.main(String) без экрана — для тестов Java-машины. */
+static int cmd_jvm_run(const char *jar, const char *cls)
+{
+    uint32_t sleep_ms;
+    int r;
+
+    if (jvm_create(bt_rt_jar, bt_rt_jar_len, jar[0] ? jar : NULL) || jvm_start_main(cls, "main", "(Ljava/lang/String;)V", "")) {
+        jvm_destroy();
+        return 1;
+    }
+    while ((r = jvm_step(50, &sleep_ms)) >= 0)
+        if (r == 0)
+            platform_sleep_ms(sleep_ms ? sleep_ms : 1);
+    jvm_destroy();
+    return 0;
+}
+
+static int cmd_dump_rt(const char *path)
+{
+    FILE *f = fopen(path, "wb");
+
+    if (!f || fwrite(bt_rt_jar, 1, bt_rt_jar_len, f) != bt_rt_jar_len) {
+        BT_LOG("не удалось записать %s\n", path);
+        if (f)
+            fclose(f);
+        return 1;
+    }
+    fclose(f);
     return 0;
 }
 
@@ -222,13 +259,17 @@ static int is_dir(const char *path)
 
 int main(int argc, char **argv)
 {
-    PlatformConfig cfg = { 240, 320, 1, SCALE_AUTO, 0, "BT-J2ME" };
+    PlatformConfig cfg = { 240, 320, 1, SCALE_AUTO, 1, "BT-J2ME" };
     char dir[1024];
 
     if (argc >= 2 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)) {
         usage();
         return 0;
     }
+    if (argc == 4 && strcmp(argv[1], "jvm-run") == 0)
+        return cmd_jvm_run(argv[2], argv[3]);
+    if (argc == 3 && strcmp(argv[1], "dump-rt") == 0)
+        return cmd_dump_rt(argv[2]);
     if (argc >= 2 && strcmp(argv[1], "--version") == 0) {
         puts("BT-J2ME " BT_VERSION);
         return 0;
@@ -247,12 +288,26 @@ int main(int argc, char **argv)
     if (strcmp(argv[1], "display-test") == 0)
         return parse_opts(argc, argv, 2, &cfg) ? 2 : cmd_display_test(&cfg);
     if (strcmp(argv[1], "run") == 0 && argc >= 3) {
+        char err[200], base[256];
+        const char *slash = strrchr(argv[2], '/');
+        size_t n;
+        MidpResult r;
+
         if (parse_opts(argc, argv, 3, &cfg))
             return 2;
-        if (cmd_info(argv[2]))
+        snprintf(base, sizeof(base), "%s", slash ? slash + 1 : argv[2]);
+        n = strlen(base);
+        if (n > 4 && strcmp(base + n - 4, ".jar") == 0)
+            base[n - 4] = '\0';
+        if (platform_init(&cfg))
             return 1;
-        BT_LOG("интерпретатор байткода ещё не реализован (этап 2, см. docs/CONCEPT.md)\n");
-        return 3;
+        r = midp_run(argv[2], base, cfg.scale, err, sizeof(err));
+        platform_shutdown();
+        if (r == MIDP_ERROR) {
+            BT_LOG("%s: %s\n", argv[2], err);
+            return 1;
+        }
+        return 0;
     }
     usage();
     return 2;

@@ -159,15 +159,43 @@ static void parse_members(Reader *r, ClassFile *cf, uint16_t *count, Member **ou
 
             if (!need(r, alen))
                 return;
-            if (is_method && utf8_is(cf, aname, "Code") && alen >= 8) {
-                m->max_stack  = rd_be16(r->p);
-                m->max_locals = rd_be16(r->p + 2);
-                m->code_len   = rd_be32(r->p + 4);
-                if (m->code_len > alen - 8) {
+            if (is_method && utf8_is(cf, aname, "Code") && alen >= 12) {
+                const uint8_t *a = r->p, *end = r->p + alen, *q;
+                uint16_t k, n;
+
+                m->max_stack  = rd_be16(a);
+                m->max_locals = rd_be16(a + 2);
+                m->code_len   = rd_be32(a + 4);
+                if (m->code_len > alen - 12) {
                     fail(r, "атрибут Code длиннее, чем объявлено");
                     return;
                 }
-                m->code = r->p + 8;
+                m->code = a + 8;
+                q = m->code + m->code_len;
+                m->exc_count = rd_be16(q);
+                m->exc_table = q + 2;
+                q += 2 + (size_t)m->exc_count * 8;
+                if (q + 2 > end) {
+                    fail(r, "повреждена таблица исключений");
+                    return;
+                }
+                /* вложенные атрибуты Code: ищем LineNumberTable */
+                n = rd_be16(q);
+                q += 2;
+                for (k = 0; k < n && q + 6 <= end; k++) {
+                    uint32_t sl = rd_be32(q + 2);
+                    if (sl > (size_t)(end - q - 6))
+                        break;
+                    if (utf8_is(cf, rd_be16(q), "LineNumberTable") && sl >= 2) {
+                        m->line_count = rd_be16(q + 6);
+                        m->line_table = q + 8;
+                        if ((size_t)m->line_count * 4 > sl - 2)
+                            m->line_count = 0;
+                    }
+                    q += 6 + sl;
+                }
+            } else if (!is_method && utf8_is(cf, aname, "ConstantValue") && alen >= 2) {
+                m->const_idx = rd_be16(r->p);
             }
             r->p += alen;
         }

@@ -34,7 +34,25 @@ else
     (cd "$OUT/classes" && jar cfm0 "$OUT/hello-stored.jar" "$DIR/fixtures/hello/MANIFEST.MF" .)
     check "deflate JAR" 0 "Hello -> com.example.Hello" "$BIN" info "$OUT/hello.jar"
     check "stored JAR" 0 "Классы:       1, с ошибками: 0" "$BIN" info "$OUT/hello-stored.jar"
-    check "run пока без VM" 3 "этап 2" "$BIN" run "$OUT/hello.jar"
+    if [ "${BT_BACKEND:-sdl2}" = sdl2 ]; then
+        check "run: класс не MIDlet" 1 "ничего не показав" env SDL_VIDEODRIVER=dummy XDG_DATA_HOME="$OUT/xdg" \
+            "$BIN" run "$OUT/hello.jar" --windowed
+    fi
+
+    # Java-машина и MIDP: тесты на Java, собранные против встроенной библиотеки
+    "$BIN" dump-rt "$OUT/rt.jar"
+    mkdir -p "$OUT/vm" "$OUT/midp"
+    JAVAC="javac -nowarn -Xlint:-options -encoding UTF-8 -source 8 -target 8 -bootclasspath $OUT/rt.jar"
+    $JAVAC -d "$OUT/vm" "$DIR/java/VmTest.java" 2>/dev/null
+    (cd "$OUT/vm" && jar cf "$OUT/vmtest.jar" .)
+    check "Java-машина" 0 "DONE passed=[0-9]* fails=0" "$BIN" jvm-run "$OUT/vmtest.jar" VmTest
+    $JAVAC -d "$OUT/midp" "$DIR/java/MidpTest.java" 2>/dev/null
+    printf 'MIDlet-1: MidpTest, , MidpTest\nMIDlet-Name: MidpTest\nMIDlet-Vendor: BT-J2ME\nMIDlet-Version: 1.0\n' > "$OUT/midp.mf"
+    (cd "$OUT/midp" && jar cfm "$OUT/midptest.jar" "$OUT/midp.mf" .)
+    if [ "${BT_BACKEND:-sdl2}" = sdl2 ]; then
+        check "MIDP" 0 "MIDP DONE passed=[0-9]* fails=0" env SDL_VIDEODRIVER=dummy XDG_DATA_HOME="$OUT/xdg" \
+            timeout 30 "$BIN" run "$OUT/midptest.jar" --windowed
+    fi
 
     # Меню-полка на виртуальном экране SDL: несколько секунд без падений (timeout => код 124)
     if [ "${BT_BACKEND:-sdl2}" = sdl2 ] && command -v timeout >/dev/null 2>&1; then

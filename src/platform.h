@@ -13,13 +13,14 @@
 enum {
     KEY_NUM0 = 48, KEY_NUM9 = 57, KEY_STAR = 42, KEY_POUND = 35,
     KEY_UP = -1, KEY_DOWN = -2, KEY_LEFT = -3, KEY_RIGHT = -4, KEY_FIRE = -5,
-    KEY_SOFT_LEFT = -6, KEY_SOFT_RIGHT = -7
+    KEY_SOFT_LEFT = -6, KEY_SOFT_RIGHT = -7, KEY_CLEAR = -8
 };
 
 typedef enum {
     EV_NONE, EV_KEY_DOWN, EV_KEY_UP, EV_POINTER_DOWN, EV_POINTER_UP, EV_POINTER_MOVE,
     EV_BACK,        /* Esc или кнопка Xbox: из игры — в меню, из меню — выход */
     EV_PAD_ADDED,   /* подключён геймпад, name — его название */
+    EV_CHAR,        /* набран символ (поля ввода в играх), ch — код */
     EV_QUIT         /* закрыли окно / F10 */
 } EventType;
 
@@ -29,6 +30,8 @@ typedef struct {
     int         x, y;   /* для EV_POINTER_*, уже в координатах виртуального экрана */
     const char *name;   /* для EV_PAD_ADDED */
     int         pad;    /* 1 — событие пришло с геймпада (лаунчер подстраивает подсказки) */
+    int         printable; /* клавиша печатная — её символ придёт ещё и как EV_CHAR */
+    int         ch;     /* для EV_CHAR */
 } Event;
 
 typedef enum {

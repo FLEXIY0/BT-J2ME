@@ -33,6 +33,12 @@ typedef struct {
     uint16_t       max_locals;
     uint32_t       code_len;
     const uint8_t *code;
+    uint16_t       exc_count;      /* таблица исключений: по 8 байт на запись */
+    const uint8_t *exc_table;
+    uint16_t       line_count;     /* LineNumberTable: по 4 байта — для трассировок */
+    const uint8_t *line_table;
+    /* Только для полей: ConstantValue у static final */
+    uint16_t       const_idx;
 } Member;
 
 typedef struct {

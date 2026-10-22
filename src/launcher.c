@@ -1,6 +1,7 @@
 #define _DEFAULT_SOURCE
 #include "launcher.h"
 #include "library.h"
+#include "midp.h"
 #include "util.h"
 
 #include <math.h>
@@ -687,43 +688,49 @@ static void draw_launch_overlay(Ui *ui, uint32_t now)
     }
 }
 
-/* Экран «игры»: пока нет Java-машины — иконка игры и «стройка», без слов. */
-static void run_game(Ui *ui, Game *g)
+/* Запуск игры на Java-машине. Возвращает 1, если закрыли окно и надо выйти совсем. */
+static int run_game(Ui *ui, Game *g)
 {
     ScaleMode mode = ui->cli_scale != SCALE_AUTO ? ui->cli_scale : ui->set.sharp ? SCALE_INTEGER : SCALE_AUTO;
-    int running = 1;
+    char err[200];
+    MidpResult r = midp_run(g->path, g->base, mode, err, sizeof(err));
+    uint32_t until;
 
+    if (r == MIDP_QUIT)
+        return 1;
+    if (r != MIDP_ERROR)
+        return 0;
+
+    /* не запустилась: иконка игры, красный крест, без слов; причина — в журнал */
+    BT_LOG("%s: %s\n", g->path, err);
     platform_set_screen(240, 320, mode);
-    while (running) {
+    until = platform_ticks_ms() + 5000;
+    while ((int32_t)(platform_ticks_ms() - until) < 0) {
         Image *s = platform_screen();
-        uint32_t now = platform_ticks_ms();
         Event ev;
-        int y = 90, x, k = 1;
+        int k, y = 110, i;
 
         while (platform_poll(&ev)) {
-            if (ev.type == EV_QUIT || ev.type == EV_BACK || (ev.type == EV_KEY_DOWN && ev.key == KEY_SOFT_RIGHT))
-                running = 0;
-            if (ev.type == EV_PAD_ADDED)
-                ui->pad_connected = 1;
+            if (ev.type == EV_QUIT)
+                return 1;
+            if (ev.type == EV_BACK || ev.type == EV_KEY_DOWN || ev.type == EV_POINTER_DOWN)
+                until = platform_ticks_ms();
         }
         gfx_fill(s, 0, 0, s->w, s->h, 0xFF0B0A10u);
         if (g->icon.px) {
             k = imax(1, 72 / imax(g->icon.w, g->icon.h));
             gfx_blit_scaled(s, &g->icon, (s->w - g->icon.w * k) / 2, y - g->icon.h * k / 2, g->icon.w * k,
-                            g->icon.h * k, 255);
-        } else {
-            gfx_disc(s, s->w / 2, y, 36, (float)now / 4000.0f, 255);
+                            g->icon.h * k, 120);
         }
-        /* бегущая «строительная» лента — Java-машина ещё строится */
-        for (x = -16; x < 160; x += 16)
-            gfx_fill(s, 40 + x + (int)(now / 60 % 16), 170, 8, 8, 0xFFFFC233u);
-        gfx_fill(s, 0, 170, 40, 8, 0xFF0B0A10u);
-        gfx_fill(s, 200, 170, 40, 8, 0xFF0B0A10u);
-        gfx_frame(s, 39, 169, 162, 10, 0xFF3A3640u);
+        for (i = -14; i <= 14; i++) {
+            gfx_fill(s, s->w / 2 + i - 2, y + 70 + i - 2, 5, 5, 0xFFE2483Du);
+            gfx_fill(s, s->w / 2 + i - 2, y + 70 - i - 2, 5, 5, 0xFFE2483Du);
+        }
         draw_icon(s, &icon_back, 12, s->h - 20, 1, 0xFF8F8899u, 0);
         platform_present();
         platform_sleep_ms(16);
     }
+    return 0;
 }
 
 /* ---------- логика ---------- */
@@ -985,13 +992,15 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
         platform_present();
 
         if (ui.launch_t0 && now - ui.launch_t0 >= LAUNCH_MS) {
-            run_game(&ui, &ui.lib.games[ui.sel]);
+            if (run_game(&ui, &ui.lib.games[ui.sel]))
+                running = 0;
             ui.launch_t0 = 0;
             ui.held = 0;
             layout(&ui);
             prev = platform_ticks_ms();
         }
-        platform_sleep_ms(now + 16 > platform_ticks_ms() ? now + 16 - platform_ticks_ms() : 1);
+        /* 30 кадров в секунду хватает для плавного меню и вдвое экономит процессор */
+        platform_sleep_ms(now + 33 > platform_ticks_ms() ? now + 33 - platform_ticks_ms() : 1);
     }
     library_free(&ui.lib);
     platform_shutdown();

@@ -29,6 +29,8 @@ static void push(EventType type, int key)
     e->x = e->y = 0;
     e->name = NULL;
     e->pad = 0;
+    e->printable = 0;
+    e->ch = 0;
 }
 
 static void push_pad(EventType type, int key)
@@ -96,6 +98,10 @@ int platform_init(const PlatformConfig *cfg)
         BT_LOG("геймпады недоступны: %s\n", SDL_GetError());
     /* Ближайший сосед: никакого «мыла» на пиксель-арте. */
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
+    if (cfg->software) {
+        SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
+        SDL_SetHint(SDL_HINT_FRAMEBUFFER_ACCELERATION, "0");
+    }
 
     win = SDL_CreateWindow(cfg->title ? cfg->title : "BT-J2ME", SDL_WINDOWPOS_CENTERED,
                            SDL_WINDOWPOS_CENTERED, cfg->width * 2, cfg->height * 2, wflags);
@@ -103,7 +109,8 @@ int platform_init(const PlatformConfig *cfg)
         BT_LOG("SDL_CreateWindow: %s\n", SDL_GetError());
         return -1;
     }
-    ren = SDL_CreateRenderer(win, -1, rflags | SDL_RENDERER_PRESENTVSYNC);
+    /* программный рендер без vsync: иначе SDL выберет OpenGL и потянет за собой Mesa/LLVM */
+    ren = SDL_CreateRenderer(win, -1, cfg->software ? SDL_RENDERER_SOFTWARE : rflags | SDL_RENDERER_PRESENTVSYNC);
     if (!ren)
         ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE);
     if (!ren) {
@@ -159,6 +166,7 @@ static int map_key(SDL_Keycode k)
     case SDLK_KP_MULTIPLY: case SDLK_ASTERISK: return KEY_STAR;
     case SDLK_KP_DIVIDE: case SDLK_HASH: return KEY_POUND;
     case SDLK_KP_0: return KEY_NUM0;
+    case SDLK_BACKSPACE: case SDLK_DELETE: return KEY_CLEAR;
     default:
         if (k >= SDLK_0 && k <= SDLK_9)
             return KEY_NUM0 + (int)(k - SDLK_0);
@@ -229,7 +237,21 @@ static void translate(const SDL_Event *e)
         if (e->key.repeat || !(key = map_key(e->key.keysym.sym)))
             break;
         push(e->type == SDL_KEYDOWN ? EV_KEY_DOWN : EV_KEY_UP, key);
+        queue[(q_head + q_len - 1) % QUEUE_LEN].printable = e->key.keysym.sym >= 32 && e->key.keysym.sym < 127;
         break;
+    case SDL_TEXTINPUT: {
+        const unsigned char *u = (const unsigned char *)e->text.text;
+        int cp = u[0];
+        if ((u[0] & 0xE0) == 0xC0 && u[1])
+            cp = ((u[0] & 0x1F) << 6) | (u[1] & 0x3F);
+        else if ((u[0] & 0xF0) == 0xE0 && u[1] && u[2])
+            cp = ((u[0] & 0x0F) << 12) | ((u[1] & 0x3F) << 6) | (u[2] & 0x3F);
+        if (cp >= 32 && cp < 0x10000) {
+            push(EV_CHAR, 0);
+            queue[(q_head + q_len - 1) % QUEUE_LEN].ch = cp;
+        }
+        break;
+    }
     case SDL_CONTROLLERDEVICEADDED:
         open_pad(e->cdevice.which);
         break;
