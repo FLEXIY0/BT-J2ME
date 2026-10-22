@@ -35,6 +35,31 @@ public final class Native {
 
     public static native String[] rmsList();
 
+    /* звук: дескриптор (0 — не вышло); kind 0 — по содержимому, 1 — рингтон Nokia OTT */
+    public static native int sndCreate(byte[] data, int kind);
+
+    public static native int sndCreateFreq(int hz, int ms);
+
+    public static native void sndFree(int h);
+
+    public static native void sndPlay(int h);
+
+    public static native void sndPause(int h);
+
+    public static native boolean sndPlaying(int h);
+
+    public static native void sndLoops(int h, int loops);
+
+    public static native void sndVolume(int h, int volume);
+
+    public static native long sndTime(int h);
+
+    public static native long sndSeek(int h, long us);
+
+    public static native long sndDuration(int h);
+
+    public static native void sndTone(int note, int ms, int volume);
+
     public static final int EV_KEY_DOWN = 1;
     public static final int EV_KEY_UP = 2;
     public static final int EV_POINTER_DOWN = 3;

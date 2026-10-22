@@ -1,8 +1,13 @@
 import javax.microedition.lcdui.*;
+import javax.microedition.media.*;
+import javax.microedition.media.control.*;
 import javax.microedition.midlet.MIDlet;
 import javax.microedition.rms.*;
 
-/* Самопроверка MIDP: рисование (по пикселям), шрифты, RMS, экраны, цикл событий. */
+import com.nokia.mid.sound.Sound;
+import com.nokia.mid.sound.SoundListener;
+
+/* Самопроверка MIDP: рисование (по пикселям), шрифты, RMS, звук, экраны, цикл событий. */
 public class MidpTest extends MIDlet {
     static int passed, fails;
 
@@ -19,6 +24,65 @@ public class MidpTest extends MIDlet {
         int[] p = new int[1];
         img.getRGB(p, 0, 1, x, y, 1, 1);
         return p[0];
+    }
+
+
+    static void sleep(int ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+        }
+    }
+
+    /* ждём, пока плеер доиграет (не дольше ms) */
+    static boolean waitState(Player p, int state, int ms) {
+        for (int t = 0; t < ms && p.getState() != state; t += 10)
+            sleep(10);
+        return p.getState() == state;
+    }
+
+    /* MIDI-файл формата 0: одна нота длиной 1 такт (480 тиков) при темпе 500000 мкс — ровно 0,5 с */
+    static byte[] midi() {
+        return new byte[] { 'M', 'T', 'h', 'd', 0, 0, 0, 6, 0, 0, 0, 1, 1, (byte) 0xE0,
+            'M', 'T', 'r', 'k', 0, 0, 0, 16,
+            0, (byte) 0xC0, 80,
+            0, (byte) 0x90, 69, 100,
+            (byte) 0x83, 0x60, (byte) 0x80, 69, 0,
+            0, (byte) 0xFF, 0x2F, 0 };
+    }
+
+    /* WAV 8 кГц 8 бит: 2000 сэмплов — 0,25 с */
+    static byte[] wav() {
+        int n = 2000;
+        byte[] b = new byte[44 + n];
+        String h = "RIFF....WAVEfmt ";
+        for (int i = 0; i < 16; i++)
+            b[i] = (byte) h.charAt(i);
+        int[] fmt = { 16, 0, 0, 0, 1, 0, 1, 0, 0x40, 0x1F, 0, 0, 0x40, 0x1F, 0, 0, 1, 0, 8, 0 };
+        for (int i = 0; i < fmt.length; i++)
+            b[16 + i] = (byte) fmt[i];
+        b[36] = 'd'; b[37] = 'a'; b[38] = 't'; b[39] = 'a';
+        b[40] = (byte) (n & 0xFF);
+        b[41] = (byte) (n >> 8);
+        for (int i = 0; i < n; i++)
+            b[44 + i] = (byte) (128 + ((i / 10) % 2 == 0 ? 60 : -60));
+        return b;
+    }
+
+    /* рингтон Nokia OTT: 4 четвертные ноты при 125 уд/мин — 1,92 с */
+    static byte[] ott() {
+        int[] v = { 2, 8, 0x25, 7, 0, 1, 0x1D, 7, 0, 3, 1, 8, 0, 3, 0, 2, 0, 4, 6, 8,
+            4, 3, 14, 5, 2, 3, 1, 2,
+            1, 3, 1, 4, 2, 3, 0, 2,  1, 3, 5, 4, 2, 3, 0, 2,  1, 3, 8, 4, 2, 3, 0, 2,  1, 3, 1, 4, 2, 3, 0, 2 };
+        /* пары «значение, число бит» после первого числа-счётчика команд */
+        byte[] out = new byte[16];
+        int bit = 0;
+        for (int i = 0; i + 1 < v.length; i += 2) {
+            for (int k = v[i + 1] - 1; k >= 0; k--, bit++)
+                if (((v[i] >> k) & 1) != 0)
+                    out[bit >> 3] |= (byte) (0x80 >> (bit & 7));
+        }
+        return out;
     }
 
     class TestCanvas extends Canvas {
@@ -100,6 +164,92 @@ public class MidpTest extends MIDlet {
             check("rms list", list != null && list.length >= 1);
         } catch (Exception e) {
             check("rms exception " + e, false);
+        }
+
+
+        /* звук: тоновая последовательность, MIDI, WAV, повторы, слушатели, Nokia Sound */
+        try {
+            Player tp = Manager.createPlayer(Manager.TONE_DEVICE_LOCATOR);
+            tp.realize();
+            ToneControl tc = (ToneControl) tp.getControl("ToneControl");
+            /* темп 120 уд/мин (байт 30), 8 нот по 1/16 (4 из 64): 0,125 с каждая — 1 с */
+            tc.setSequence(new byte[] { ToneControl.VERSION, 1, ToneControl.TEMPO, 30,
+                60, 4, 62, 4, 64, 4, ToneControl.SILENCE, 4, 65, 4, 67, 4, 69, 4, 71, 4 });
+            check("tone duration", Math.abs(tp.getDuration() - 1000000) < 2000);
+            final int[] events = new int[3];
+            tp.addPlayerListener(new PlayerListener() {
+                public void playerUpdate(Player p, String ev, Object data) {
+                    if (ev == STARTED) events[0]++;
+                    if (ev == END_OF_MEDIA) events[1]++;
+                    if (ev == STOPPED) events[2]++;
+                }
+            });
+            tp.start();
+            check("tone started", tp.getState() == Player.STARTED && events[0] == 1);
+            sleep(300);
+            long mt = tp.getMediaTime();
+            check("tone media time", mt > 150000 && mt < 700000);
+            check("tone end", waitState(tp, Player.PREFETCHED, 2500) && events[1] >= 1);
+            tp.close();
+            check("closed", tp.getState() == Player.CLOSED);
+
+            Player mp = Manager.createPlayer(new java.io.ByteArrayInputStream(midi()), "audio/midi");
+            mp.prefetch();
+            check("midi duration", Math.abs(mp.getDuration() - 500000) < 2000);
+            mp.setLoopCount(2);
+            long t0 = System.currentTimeMillis();
+            mp.start();
+            boolean ended = waitState(mp, Player.PREFETCHED, 3000);
+            long took = System.currentTimeMillis() - t0;
+            check("midi loops " + took + " ms", ended && took >= 900 && took < 1500);
+            mp.start();
+            sleep(100);
+            mp.stop();
+            check("midi stop", mp.getState() == Player.PREFETCHED);
+            mp.close();
+
+            Player wp = Manager.createPlayer(new java.io.ByteArrayInputStream(wav()), "audio/x-wav");
+            wp.realize();
+            check("wav duration", wp.getDuration() == 250000);
+            check("wav seek", Math.abs(wp.setMediaTime(100000) - 100000) < 1000 && Math.abs(wp.getMediaTime() - 100000) < 1000);
+            VolumeControl vc = (VolumeControl) wp.getControl("VolumeControl");
+            check("volume", vc.setLevel(150) == 100 && vc.getLevel() == 100);
+            wp.start();
+            check("wav end", waitState(wp, Player.PREFETCHED, 1500));
+            wp.close();
+
+            Player bad = Manager.createPlayer(new java.io.ByteArrayInputStream(new byte[] { 1, 2, 3, 4 }), "audio/amr");
+            bad.start();
+            check("unknown format plays silence", bad.getDuration() == Player.TIME_UNKNOWN && bad.getState() == Player.STARTED);
+            bad.close();
+
+            Manager.playTone(69, 100, 50);
+            check("playTone", true);
+        } catch (Exception e) {
+            check("sound exception " + e, false);
+        }
+        {
+            final int[] ev = new int[2];
+            SoundListener sl = new SoundListener() {
+                public void soundStateChanged(Sound s, int e) {
+                    ev[e == Sound.SOUND_PLAYING ? 0 : 1]++;
+                }
+            };
+            Sound s = new Sound(880, 200);
+            s.setSoundListener(sl);
+            s.play(1);
+            check("nokia tone playing", s.getState() == Sound.SOUND_PLAYING);
+            for (int w = 0; w < 1500 && s.getState() == Sound.SOUND_PLAYING; w += 10)
+                sleep(10);
+            check("nokia tone stopped", s.getState() == Sound.SOUND_STOPPED && ev[0] == 1 && ev[1] == 1);
+            Sound o = new Sound(ott(), Sound.FORMAT_TONE);
+            o.play(1);
+            sleep(500);
+            check("nokia ott playing", o.getState() == Sound.SOUND_PLAYING);
+            o.stop();
+            check("nokia ott stop", o.getState() == Sound.SOUND_STOPPED);
+            o.release();
+            s.release();
         }
 
         /* системные экраны создаются и показываются */

@@ -60,4 +60,11 @@ int      platform_poll(Event *ev);   /* 1 — событие получено */
 uint32_t platform_ticks_ms(void);
 void     platform_sleep_ms(uint32_t ms);
 
+/* Звук: моно 16 бит. mix зовётся из потока звука и заполняет frames сэмплов.
+ * Возвращает настоящую частоту устройства или 0, если звука нет. */
+typedef void (*AudioMixFn)(int16_t *out, int frames);
+int      platform_audio_open(int rate, AudioMixFn mix);
+void     platform_audio_lock(int on);   /* 1 — не звать mix, пока не отпустят */
+void     platform_audio_close(void);
+
 #endif
