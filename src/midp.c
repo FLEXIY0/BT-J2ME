@@ -8,11 +8,14 @@
 #include "manifest.h"
 #include "png.h"
 #include "rt.h"
+#include "compat.h"
 #include "util.h"
 
-#include <dirent.h>
 #include <errno.h>
 #include <math.h>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -779,10 +782,10 @@ static void mkdirs(const char *path)
     for (p = buf + 1; *p; p++)
         if (*p == '/') {
             *p = '\0';
-            mkdir(buf, 0755);
+            bt_mkdir(buf);
             *p = '/';
         }
-    mkdir(buf, 0755);
+    bt_mkdir(buf);
 }
 
 static void rms_path(Object *name, char *out, size_t cap)
@@ -804,7 +807,7 @@ static int n_rmsLoad(Thread *t, Value *a, Value *r)
 
     rms_path(a[0].l, path, sizeof(path));
     r->l = NULL;
-    if (!(f = fopen(path, "rb")))
+    if (!(f = bt_fopen(path, "rb")))
         return NATIVE_OK;
     if (fseek(f, 0, SEEK_END) == 0 && (len = ftell(f)) >= 0 && fseek(f, 0, SEEK_SET) == 0) {
         r->l = jvm_new_array(t, 'B', NULL, (int)len);
@@ -826,13 +829,13 @@ static int n_rmsSave(Thread *t, Value *a, Value *r)
     rms_path(a[0].l, path, sizeof(path));
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
     r->i = 0;
-    if (!data || !(f = fopen(tmp, "wb")))
+    if (!data || !(f = bt_fopen(tmp, "wb")))
         return NATIVE_OK;
     /* через временный файл: выключение посреди записи не испортит сохранение */
     r->i = fwrite(ARR_DATA(data), 1, (size_t)data->length, f) == (size_t)data->length;
     r->i &= fclose(f) == 0;
     if (r->i)
-        r->i = rename(tmp, path) == 0;
+        r->i = bt_replace(tmp, path);
     return NATIVE_OK;
 }
 
@@ -842,33 +845,33 @@ static int n_rmsDelete(Thread *t, Value *a, Value *r)
 
     (void)t;
     rms_path(a[0].l, path, sizeof(path));
-    r->i = remove(path) == 0;
+    r->i = bt_remove(path);
     return NATIVE_OK;
 }
 
 static int n_rmsList(Thread *t, Value *a, Value *r)
 {
-    DIR *d = opendir(M.rms_dir);
-    struct dirent *de;
+    BtDir *d = bt_dir_open(M.rms_dir);
+    const char *name;
     char names[64][128];
     int n = 0, i;
     Class *sc;
 
     (void)a;
-    while (d && (de = readdir(d)) != NULL && n < 64) {
-        size_t len = strlen(de->d_name), k;
-        if (len < 5 || strcmp(de->d_name + len - 4, ".rms") || (len - 4) % 2 || (len - 4) / 2 >= sizeof(names[0]))
+    while (d && (name = bt_dir_next(d)) != NULL && n < 64) {
+        size_t len = strlen(name), k;
+        if (len < 5 || strcmp(name + len - 4, ".rms") || (len - 4) % 2 || (len - 4) / 2 >= sizeof(names[0]))
             continue;
         for (k = 0; k < (len - 4) / 2; k++) {
             unsigned v;
-            sscanf(de->d_name + k * 2, "%2x", &v);
+            sscanf(name + k * 2, "%2x", &v);
             names[n][k] = (char)v;
         }
         names[n][k] = '\0';
         n++;
     }
     if (d)
-        closedir(d);
+        bt_dir_close(d);
     sc = jvm_class(t, "java/lang/String");
     if (!sc || !(r->l = jvm_new_array(t, 'L', sc, n)))
         return NATIVE_EXCEPTION;
@@ -988,7 +991,7 @@ static void load_jad(const char *jar)
         return;
     memcpy(path, jar, n - 4);
     strcpy(path + n - 4, jar[n - 1] == 'R' ? ".JAD" : ".jad");
-    if (!(f = fopen(path, "rb")))
+    if (!(f = bt_fopen(path, "rb")))
         return;
     if (fseek(f, 0, SEEK_END) == 0 && (len = ftell(f)) > 0 && len < (1 << 20) && fseek(f, 0, SEEK_SET) == 0 &&
         (buf = malloc((size_t)len)) != NULL) {
@@ -1001,7 +1004,7 @@ static void load_jad(const char *jar)
 
 static void rms_dir_for(const char *save_id)
 {
-    const char *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
+    const char *xdg = getenv("XDG_DATA_HOME"), *app = bt_appdata();
     char id[256];
     size_t i;
 
@@ -1011,8 +1014,10 @@ static void rms_dir_for(const char *save_id)
             id[i] = '_';
     if (xdg && *xdg)
         snprintf(M.rms_dir, sizeof(M.rms_dir), "%s/bt-j2me/rms/%s", xdg, id);
+    else if (app)
+        snprintf(M.rms_dir, sizeof(M.rms_dir), "%s/bt-j2me/rms/%s", app, id);
     else
-        snprintf(M.rms_dir, sizeof(M.rms_dir), "%s/.local/share/bt-j2me/rms/%s", home ? home : ".", id);
+        snprintf(M.rms_dir, sizeof(M.rms_dir), "%s/.local/share/bt-j2me/rms/%s", bt_home(), id);
 }
 
 MidpResult midp_run(const char *jar, const char *save_id, ScaleMode scale, char *err, size_t errlen)

@@ -4,3 +4,5 @@
 /tests/out/
 /tests/png_dump
 /tests/pad_test
+dist/
+/bt-j2me.exe

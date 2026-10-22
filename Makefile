@@ -30,7 +30,7 @@ endif
 
 SRC := src/main.c src/jar.c src/manifest.c src/classfile.c src/png.c src/gfx.c \
        src/library.c src/launcher.c src/platform_$(BACKEND).c \
-       src/jvm_core.c src/jvm_interp.c src/jvm_lib.c src/rt.c src/midp.c src/audio.c
+       src/jvm_core.c src/jvm_interp.c src/jvm_lib.c src/rt.c src/midp.c src/audio.c src/compat.c
 OBJ := $(SRC:.c=.o)
 
 bt-j2me: $(OBJ)
@@ -54,7 +54,7 @@ strip: bt-j2me
 	$(CROSS)strip -s bt-j2me
 
 clean:
-	rm -f bt-j2me src/*.o tests/png_dump tests/pad_test
+	rm -f bt-j2me bt-j2me.exe src/*.o tests/png_dump tests/pad_test
 	rm -rf tests/out
 
 .PHONY: test strip clean

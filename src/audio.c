@@ -1,6 +1,7 @@
 /* Звук BT-J2ME: микшер, MIDI-синтезатор и разбор звуковых форматов телефонов. */
 #include "audio.h"
 #include "platform.h"
+#include "compat.h"
 #include "util.h"
 
 #include <math.h>
@@ -609,7 +610,7 @@ static void ensure_open(void)
         return;
     A.tried = 1;
     dump = getenv("BT_AUDIO_DUMP");
-    if (dump && *dump && (A.dump = fopen(dump, "wb")) != NULL) {
+    if (dump && *dump && (A.dump = bt_fopen(dump, "wb")) != NULL) {
         A.dump_bytes = 0;
         wav_header(A.dump, RATE_WANT, 0);
     }
@@ -646,12 +647,13 @@ void audio_pump(void)
     }
     /* считаем от точки отсчёта, а не от прошлого вызова: так округление не копится */
     due = (uint64_t)(now - A.pump_t0) * (uint64_t)A.rate / 1000u;
-    frames = due - A.pump_done;
-    if (due < A.pump_done || frames < BLOCK)
+    if (due < A.pump_done + BLOCK)
         return;
-    A.pump_done = due;
+    /* целыми блоками, как у звуковой карты: огибающие считаются одинаково в обоих режимах */
+    frames = (due - A.pump_done) / BLOCK * BLOCK;
+    A.pump_done += frames;
     if (frames > (uint64_t)A.rate)       /* после долгой паузы не догоняем больше секунды */
-        frames = (uint64_t)A.rate;
+        frames = (uint64_t)A.rate / BLOCK * BLOCK;
     while (frames > 0) {
         int n = frames > 512 ? 512 : (int)frames;
         mix(buf, n);
@@ -1510,7 +1512,7 @@ void snd_tone(int note, int ms, int volume)
 
 int audio_render_file(const char *in, const char *out, int kind)
 {
-    FILE *f = fopen(in, "rb"), *o;
+    FILE *f = bt_fopen(in, "rb"), *o;
     uint8_t *data;
     long len;
     int16_t buf[BLOCK];
@@ -1534,7 +1536,7 @@ int audio_render_file(const char *in, const char *out, int kind)
     setup(RATE_WANT);
     h = snd_create(data, (size_t)len, kind);
     free(data);
-    if (!get(h) || get(h)->unknown || !(o = fopen(out, "wb"))) {
+    if (!get(h) || get(h)->unknown || !(o = bt_fopen(out, "wb"))) {
         snd_free(h);
         return -1;
     }

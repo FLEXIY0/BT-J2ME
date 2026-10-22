@@ -47,6 +47,18 @@ make CROSS=arm-linux-gnueabihf-          # кросс-сборка
 make CFLAGS="-O2 -march=pentium2"        # под конкретный старый процессор
 ```
 
+### Windows
+
+`bt-j2me.exe` — один файл без DLL (SDL2 и zlib вшиты), собирается из Linux:
+
+```sh
+sudo apt install gcc-mingw-w64-x86-64 libz-mingw-w64-dev
+sh tools/build-windows.sh    # dist/bt-j2me.exe и dist/bt-j2me-console.exe (с логами)
+```
+
+На Windows полка — папка `games` рядом с `bt-j2me.exe`, настройки и сохранения —
+в `%APPDATA%\bt-j2me`. Имена файлов и папок с русскими буквами поддерживаются.
+
 ## Использование
 
 ```sh

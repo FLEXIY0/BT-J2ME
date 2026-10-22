@@ -7,6 +7,7 @@
 #include "rt.h"
 #include "manifest.h"
 #include "platform.h"
+#include "compat.h"
 #include "util.h"
 
 #include <stdlib.h>
@@ -233,7 +234,7 @@ static int cmd_jvm_run(const char *jar, const char *cls)
 
 static int cmd_dump_rt(const char *path)
 {
-    FILE *f = fopen(path, "wb");
+    FILE *f = bt_fopen(path, "wb");
 
     if (!f || fwrite(bt_rt_jar, 1, bt_rt_jar_len, f) != bt_rt_jar_len) {
         BT_LOG("не удалось записать %s\n", path);
@@ -247,21 +248,24 @@ static int cmd_dump_rt(const char *path)
 
 static void default_games_dir(char *out, size_t cap)
 {
-    const char *env = getenv("BT_J2ME_GAMES"), *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
+    const char *env = getenv("BT_J2ME_GAMES"), *xdg = getenv("XDG_DATA_HOME");
 
     if (env && *env)
         snprintf(out, cap, "%s", env);
     else if (xdg && *xdg)
         snprintf(out, cap, "%s/bt-j2me/games", xdg);
     else
-        snprintf(out, cap, "%s/.local/share/bt-j2me/games", home ? home : ".");
+#ifdef _WIN32
+        /* на Windows — папка games рядом с bt-j2me.exe (при запуске двойным щелчком это текущая папка) */
+        snprintf(out, cap, "games");
+#else
+        snprintf(out, cap, "%s/.local/share/bt-j2me/games", bt_home());
+#endif
 }
 
 static int is_dir(const char *path)
 {
-    struct stat st;
-
-    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+    return bt_is_dir(path);
 }
 
 int main(int argc, char **argv)

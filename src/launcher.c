@@ -2,6 +2,7 @@
 #include "launcher.h"
 #include "library.h"
 #include "midp.h"
+#include "compat.h"
 #include "util.h"
 
 #include <math.h>
@@ -186,12 +187,14 @@ static void text_fit(Image *d, int cx, int y, int max_w, const char *t, uint32_t
 
 static void settings_path(Ui *ui)
 {
-    const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
+    const char *xdg = getenv("XDG_CONFIG_HOME"), *app = bt_appdata();
 
     if (xdg && *xdg)
         snprintf(ui->set_path, sizeof(ui->set_path), "%s/bt-j2me", xdg);
+    else if (app)
+        snprintf(ui->set_path, sizeof(ui->set_path), "%s/bt-j2me", app);
     else
-        snprintf(ui->set_path, sizeof(ui->set_path), "%s/.config/bt-j2me", home ? home : ".");
+        snprintf(ui->set_path, sizeof(ui->set_path), "%s/.config/bt-j2me", bt_home());
 }
 
 static void settings_load(Ui *ui)
@@ -205,7 +208,7 @@ static void settings_load(Ui *ui)
     ui->set.sharp = 0;
     settings_path(ui);
     snprintf(path, sizeof(path), "%s/settings", ui->set_path);
-    if (!(f = fopen(path, "r")))
+    if (!(f = bt_fopen(path, "r")))
         return;
     while (fscanf(f, "%31[^=]=%d\n", key, &val) == 2) {
         if (!strcmp(key, "dark"))
@@ -227,11 +230,11 @@ static void settings_save(const Ui *ui)
     snprintf(parent, sizeof(parent), "%s", ui->set_path);
     if ((slash = strrchr(parent, '/')) != NULL) {
         *slash = '\0';
-        mkdir(parent, 0755);
+        bt_mkdir(parent);
     }
-    mkdir(ui->set_path, 0755);
+    bt_mkdir(ui->set_path);
     snprintf(path, sizeof(path), "%s/settings", ui->set_path);
-    if (!(f = fopen(path, "w")))
+    if (!(f = bt_fopen(path, "w")))
         return;
     fprintf(f, "dark=%d\nbig_pixels=%d\nsharp=%d\n", ui->set.dark, ui->set.big_pixels, ui->set.sharp);
     fclose(f);
