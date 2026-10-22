@@ -2,3 +2,5 @@
 *.o
 /build/
 /tests/out/
+/tests/png_dump
+/tests/pad_test

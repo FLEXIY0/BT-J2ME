@@ -4,30 +4,101 @@
 #include <SDL.h>
 #include <stdlib.h>
 
+#define QUEUE_LEN   32
+#define STICK_PRESS 16000   /* гистерезис, чтобы стик не «дребезжал» у порога */
+#define STICK_FREE  10000
+
 static SDL_Window   *win;
 static SDL_Renderer *ren;
 static SDL_Texture  *tex;
-static uint32_t     *fb;
-static int           fb_w, fb_h;
+static Image         screen;
+static ScaleMode     scale_mode;
+static Event         queue[QUEUE_LEN];
+static int           q_head, q_len;
+static int           stick_dir[4];   /* вверх, вниз, влево, вправо */
+
+static void push(EventType type, int key)
+{
+    Event *e;
+
+    if (q_len == QUEUE_LEN)
+        return;
+    e = &queue[(q_head + q_len++) % QUEUE_LEN];
+    e->type = type;
+    e->key = key;
+    e->x = e->y = 0;
+    e->name = NULL;
+    e->pad = 0;
+}
+
+static void push_pad(EventType type, int key)
+{
+    push(type, key);
+    if (q_len)
+        queue[(q_head + q_len - 1) % QUEUE_LEN].pad = 1;
+}
+
+void platform_display_size(int *w, int *h)
+{
+    SDL_GetRendererOutputSize(ren, w, h);
+}
+
+static void apply_scale(void)
+{
+    int dw, dh, k;
+
+    platform_display_size(&dw, &dh);
+    k = dw / screen.w < dh / screen.h ? dw / screen.w : dh / screen.h;
+    /* Логический размер + целый масштаб делает SDL; «авто» решаем сами. */
+    SDL_RenderSetLogicalSize(ren, screen.w, screen.h);
+    SDL_RenderSetIntegerScale(ren, scale_mode == SCALE_INTEGER ||
+                                   (scale_mode == SCALE_AUTO && k >= 1 && k * screen.h * 100 >= dh * 85)
+                                   ? SDL_TRUE : SDL_FALSE);
+}
+
+int platform_set_screen(int w, int h, ScaleMode mode)
+{
+    if (tex)
+        SDL_DestroyTexture(tex);
+    image_free(&screen);
+    tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, w, h);
+    screen = image_new(w, h);
+    if (!tex || !screen.px) {
+        BT_LOG("не удалось создать кадровый буфер %dx%d\n", w, h);
+        return -1;
+    }
+    scale_mode = mode;
+    apply_scale();
+    return 0;
+}
+
+static void open_pad(int index)
+{
+    SDL_GameController *gc;
+
+    if (!SDL_IsGameController(index) || !(gc = SDL_GameControllerOpen(index)))
+        return;
+    push_pad(EV_PAD_ADDED, 0);
+    queue[(q_head + q_len - 1) % QUEUE_LEN].name = SDL_GameControllerName(gc);
+}
 
 int platform_init(const PlatformConfig *cfg)
 {
-    Uint32 wflags = 0, rflags = cfg->software ? SDL_RENDERER_SOFTWARE : SDL_RENDERER_ACCELERATED;
-    int ww = cfg->width * 2, wh = cfg->height * 2;
+    Uint32 wflags = cfg->fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : SDL_WINDOW_RESIZABLE;
+    Uint32 rflags = cfg->software ? SDL_RENDERER_SOFTWARE : SDL_RENDERER_ACCELERATED;
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
         BT_LOG("SDL_Init: %s\n", SDL_GetError());
         return -1;
     }
+    /* Геймпад не обязателен: без него просто работаем с клавиатуры. */
+    if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0)
+        BT_LOG("геймпады недоступны: %s\n", SDL_GetError());
     /* Ближайший сосед: никакого «мыла» на пиксель-арте. */
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
-    if (cfg->fullscreen)
-        wflags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
-    else
-        wflags |= SDL_WINDOW_RESIZABLE;
 
     win = SDL_CreateWindow(cfg->title ? cfg->title : "BT-J2ME", SDL_WINDOWPOS_CENTERED,
-                           SDL_WINDOWPOS_CENTERED, ww, wh, wflags);
+                           SDL_WINDOWPOS_CENTERED, cfg->width * 2, cfg->height * 2, wflags);
     if (!win) {
         BT_LOG("SDL_CreateWindow: %s\n", SDL_GetError());
         return -1;
@@ -39,26 +110,14 @@ int platform_init(const PlatformConfig *cfg)
         BT_LOG("SDL_CreateRenderer: %s\n", SDL_GetError());
         return -1;
     }
-    SDL_RenderSetLogicalSize(ren, cfg->width, cfg->height);
-    SDL_RenderSetIntegerScale(ren, cfg->integer_scale ? SDL_TRUE : SDL_FALSE);
     SDL_ShowCursor(cfg->fullscreen ? SDL_DISABLE : SDL_ENABLE);
-
-    tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
-                            cfg->width, cfg->height);
-    fb = calloc((size_t)cfg->width * (size_t)cfg->height, sizeof(uint32_t));
-    if (!tex || !fb) {
-        BT_LOG("не удалось создать кадровый буфер\n");
-        return -1;
-    }
-    fb_w = cfg->width;
-    fb_h = cfg->height;
-    return 0;
+    /* Уже подключённые геймпады придут событиями SDL_CONTROLLERDEVICEADDED. */
+    return platform_set_screen(cfg->width, cfg->height, cfg->scale);
 }
 
 void platform_shutdown(void)
 {
-    free(fb);
-    fb = NULL;
+    image_free(&screen);
     if (tex)
         SDL_DestroyTexture(tex);
     if (ren)
@@ -71,14 +130,14 @@ void platform_shutdown(void)
     SDL_Quit();
 }
 
-uint32_t *platform_framebuffer(void)
+Image *platform_screen(void)
 {
-    return fb;
+    return &screen;
 }
 
 void platform_present(void)
 {
-    SDL_UpdateTexture(tex, NULL, fb, fb_w * (int)sizeof(uint32_t));
+    SDL_UpdateTexture(tex, NULL, screen.px, screen.w * (int)sizeof(uint32_t));
     SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);   /* поля вокруг экрана — чёрные */
     SDL_RenderClear(ren);
     SDL_RenderCopy(ren, tex, NULL, NULL);
@@ -109,46 +168,121 @@ static int map_key(SDL_Keycode k)
     }
 }
 
+/* Геймпад Xbox (и любой, известный SDL): A — огонь, B — правая софт-клавиша («назад»),
+ * Start — левая софт-клавиша (меню/пауза), X/Y — 1/3, LB/RB — * и #, View — 0,
+ * кнопка Xbox — выход в меню. */
+static int map_button(Uint8 b)
+{
+    switch (b) {
+    case SDL_CONTROLLER_BUTTON_DPAD_UP:       return KEY_UP;
+    case SDL_CONTROLLER_BUTTON_DPAD_DOWN:     return KEY_DOWN;
+    case SDL_CONTROLLER_BUTTON_DPAD_LEFT:     return KEY_LEFT;
+    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:    return KEY_RIGHT;
+    case SDL_CONTROLLER_BUTTON_A:             return KEY_FIRE;
+    case SDL_CONTROLLER_BUTTON_B:             return KEY_SOFT_RIGHT;
+    case SDL_CONTROLLER_BUTTON_START:         return KEY_SOFT_LEFT;
+    case SDL_CONTROLLER_BUTTON_X:             return KEY_NUM0 + 1;
+    case SDL_CONTROLLER_BUTTON_Y:             return KEY_NUM0 + 3;
+    case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:  return KEY_STAR;
+    case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return KEY_POUND;
+    case SDL_CONTROLLER_BUTTON_BACK:          return KEY_NUM0;
+    default:                                  return 0;
+    }
+}
+
+static void stick_axis(Sint16 v, int neg_dir, int pos_dir, int neg_key, int pos_key)
+{
+    int want_neg = stick_dir[neg_dir] ? v < -STICK_FREE : v < -STICK_PRESS;
+    int want_pos = stick_dir[pos_dir] ? v > STICK_FREE : v > STICK_PRESS;
+
+    if (want_neg != stick_dir[neg_dir])
+        push_pad(want_neg ? EV_KEY_DOWN : EV_KEY_UP, neg_key);
+    if (want_pos != stick_dir[pos_dir])
+        push_pad(want_pos ? EV_KEY_DOWN : EV_KEY_UP, pos_key);
+    stick_dir[neg_dir] = want_neg;
+    stick_dir[pos_dir] = want_pos;
+}
+
+static void translate(const SDL_Event *e)
+{
+    int key;
+
+    switch (e->type) {
+    case SDL_QUIT:
+        push(EV_QUIT, 0);
+        break;
+    case SDL_WINDOWEVENT:
+        if (e->window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
+            apply_scale();
+        break;
+    case SDL_KEYDOWN:
+    case SDL_KEYUP:
+        if (e->key.keysym.sym == SDLK_F10) {
+            push(EV_QUIT, 0);
+            break;
+        }
+        if (e->key.keysym.sym == SDLK_ESCAPE) {
+            if (e->type == SDL_KEYDOWN && !e->key.repeat)
+                push(EV_BACK, 0);
+            break;
+        }
+        if (e->key.repeat || !(key = map_key(e->key.keysym.sym)))
+            break;
+        push(e->type == SDL_KEYDOWN ? EV_KEY_DOWN : EV_KEY_UP, key);
+        break;
+    case SDL_CONTROLLERDEVICEADDED:
+        open_pad(e->cdevice.which);
+        break;
+    case SDL_CONTROLLERDEVICEREMOVED: {
+        SDL_GameController *gc = SDL_GameControllerFromInstanceID(e->cdevice.which);
+        if (gc)
+            SDL_GameControllerClose(gc);
+        break;
+    }
+    case SDL_CONTROLLERBUTTONDOWN:
+    case SDL_CONTROLLERBUTTONUP:
+        if (e->cbutton.button == SDL_CONTROLLER_BUTTON_GUIDE) {
+            if (e->type == SDL_CONTROLLERBUTTONDOWN)
+                push_pad(EV_BACK, 0);
+        } else if ((key = map_button(e->cbutton.button)) != 0) {
+            push_pad(e->type == SDL_CONTROLLERBUTTONDOWN ? EV_KEY_DOWN : EV_KEY_UP, key);
+        }
+        break;
+    case SDL_CONTROLLERAXISMOTION:
+        if (e->caxis.axis == SDL_CONTROLLER_AXIS_LEFTX)
+            stick_axis(e->caxis.value, 2, 3, KEY_LEFT, KEY_RIGHT);
+        else if (e->caxis.axis == SDL_CONTROLLER_AXIS_LEFTY)
+            stick_axis(e->caxis.value, 0, 1, KEY_UP, KEY_DOWN);
+        break;
+    case SDL_MOUSEBUTTONDOWN:
+    case SDL_MOUSEBUTTONUP:
+        /* При SDL_RenderSetLogicalSize координаты уже приведены к виртуальному экрану. */
+        push(e->type == SDL_MOUSEBUTTONDOWN ? EV_POINTER_DOWN : EV_POINTER_UP, 0);
+        queue[(q_head + q_len - 1) % QUEUE_LEN].x = e->button.x;
+        queue[(q_head + q_len - 1) % QUEUE_LEN].y = e->button.y;
+        break;
+    case SDL_MOUSEMOTION:
+        if (e->motion.state & SDL_BUTTON_LMASK) {
+            push(EV_POINTER_MOVE, 0);
+            queue[(q_head + q_len - 1) % QUEUE_LEN].x = e->motion.x;
+            queue[(q_head + q_len - 1) % QUEUE_LEN].y = e->motion.y;
+        }
+        break;
+    }
+}
+
 int platform_poll(Event *ev)
 {
     SDL_Event e;
 
-    while (SDL_PollEvent(&e)) {
-        ev->type = EV_NONE;
-        switch (e.type) {
-        case SDL_QUIT:
-            ev->type = EV_QUIT;
-            return 1;
-        case SDL_KEYDOWN:
-        case SDL_KEYUP:
-            if (e.key.keysym.sym == SDLK_ESCAPE || e.key.keysym.sym == SDLK_F10) {
-                ev->type = EV_QUIT;
-                return 1;
-            }
-            if (e.key.repeat)
-                break;
-            ev->key = map_key(e.key.keysym.sym);
-            if (!ev->key)
-                break;
-            ev->type = e.type == SDL_KEYDOWN ? EV_KEY_DOWN : EV_KEY_UP;
-            return 1;
-        case SDL_MOUSEBUTTONDOWN:
-        case SDL_MOUSEBUTTONUP:
-            /* При SDL_RenderSetLogicalSize координаты уже приведены к виртуальному экрану. */
-            ev->type = e.type == SDL_MOUSEBUTTONDOWN ? EV_POINTER_DOWN : EV_POINTER_UP;
-            ev->x = e.button.x;
-            ev->y = e.button.y;
-            return 1;
-        case SDL_MOUSEMOTION:
-            if (!(e.motion.state & SDL_BUTTON_LMASK))
-                break;
-            ev->type = EV_POINTER_MOVE;
-            ev->x = e.motion.x;
-            ev->y = e.motion.y;
-            return 1;
-        }
-    }
-    return 0;
+    while (!q_len && SDL_PollEvent(&e))
+        translate(&e);
+    if (!q_len)
+        return 0;
+    *ev = queue[q_head];
+    q_head = (q_head + 1) % QUEUE_LEN;
+    q_len--;
+    return 1;
 }
 
 uint32_t platform_ticks_ms(void)

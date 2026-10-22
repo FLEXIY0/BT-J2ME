@@ -3,24 +3,34 @@
 #include "platform.h"
 #include "util.h"
 
-#include <stdlib.h>
 #include <time.h>
 
-static uint32_t *fb;
+static Image screen;
 
 int platform_init(const PlatformConfig *cfg)
 {
-    fb = calloc((size_t)cfg->width * (size_t)cfg->height, sizeof(uint32_t));
-    return fb ? 0 : -1;
+    return platform_set_screen(cfg->width, cfg->height, cfg->scale);
 }
 
 void platform_shutdown(void)
 {
-    free(fb);
-    fb = NULL;
+    image_free(&screen);
 }
 
-uint32_t *platform_framebuffer(void) { return fb; }
+void platform_display_size(int *w, int *h)
+{
+    *w = 1024;
+    *h = 768;
+}
+
+int platform_set_screen(int w, int h, ScaleMode mode)
+{
+    image_free(&screen);
+    screen = image_new(w, h);
+    return screen.px ? 0 : -1;
+}
+
+Image *platform_screen(void) { return &screen; }
 void platform_present(void) {}
 
 int platform_poll(Event *ev)

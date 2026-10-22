@@ -1,11 +1,13 @@
 #include "classfile.h"
 #include "jar.h"
+#include "launcher.h"
 #include "manifest.h"
 #include "platform.h"
 #include "util.h"
 
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define BT_VERSION "0.1.0-dev"
 
@@ -18,13 +20,16 @@ static void usage(void)
 {
     fprintf(stderr,
         "BT-J2ME " BT_VERSION " — лёгкий запускатель J2ME-игр\n\n"
+        "  bt-j2me [папка] [опции]          меню-полка с играми (по умолчанию\n"
+        "                                   $BT_J2ME_GAMES или ~/.local/share/bt-j2me/games)\n"
         "  bt-j2me info <игра.jar>          сведения о MIDlet и проверка классов\n"
         "  bt-j2me run <игра.jar> [опции]   запуск (интерпретатор — этап 2 дорожной карты)\n"
         "  bt-j2me display-test [опции]     проверка экрана и клавиш\n\n"
         "Опции:\n"
         "  -s WxH        виртуальный экран (по умолчанию 240x320)\n"
         "  --windowed    в окне вместо полного экрана\n"
-        "  --smooth      дробное масштабирование (по умолчанию только целое)\n"
+        "  --smooth      дробное масштабирование (по умолчанию — авто)\n"
+        "  --sharp       только целое масштабирование\n"
         "  --soft        программный рендер для старых видеокарт\n");
 }
 
@@ -109,14 +114,16 @@ static void fill(uint32_t *fb, int w, int h, int x, int y, int rw, int rh, uint3
 /* Тестовый экран: цифровая клавиатура 3x4 и крестовина; нажатые клавиши подсвечиваются. */
 static int cmd_display_test(PlatformConfig *cfg)
 {
+    Image *scr;
     static const int pad[12] = { '1', '2', '3', '4', '5', '6', '7', '8', '9', KEY_STAR, '0', KEY_POUND };
     int held[12] = { 0 }, dir[5] = { 0 }, soft[2] = { 0 }, running = 1, px = -1, py = -1;
     int w = cfg->width, h = cfg->height;
 
     if (platform_init(cfg))
         return 1;
+    scr = platform_screen();
     while (running) {
-        uint32_t *fb = platform_framebuffer();
+        uint32_t *fb = scr->px;
         int cw = w / 5, ch = h / 10, ox = (w - cw * 3 - 8) / 2, oy = h / 2;
         int i, k;
         Event ev;
@@ -124,7 +131,7 @@ static int cmd_display_test(PlatformConfig *cfg)
         while (platform_poll(&ev)) {
             int down = ev.type == EV_KEY_DOWN;
 
-            if (ev.type == EV_QUIT)
+            if (ev.type == EV_QUIT || ev.type == EV_BACK)
                 running = 0;
             if (ev.type == EV_POINTER_DOWN || ev.type == EV_POINTER_MOVE) {
                 px = ev.x;
@@ -181,7 +188,9 @@ static int parse_opts(int argc, char **argv, int start, PlatformConfig *cfg)
         } else if (strcmp(argv[i], "--windowed") == 0) {
             cfg->fullscreen = 0;
         } else if (strcmp(argv[i], "--smooth") == 0) {
-            cfg->integer_scale = 0;
+            cfg->scale = SCALE_FIT;
+        } else if (strcmp(argv[i], "--sharp") == 0) {
+            cfg->scale = SCALE_INTEGER;
         } else if (strcmp(argv[i], "--soft") == 0) {
             cfg->software = 1;
         } else {
@@ -192,13 +201,46 @@ static int parse_opts(int argc, char **argv, int start, PlatformConfig *cfg)
     return 0;
 }
 
+static void default_games_dir(char *out, size_t cap)
+{
+    const char *env = getenv("BT_J2ME_GAMES"), *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
+
+    if (env && *env)
+        snprintf(out, cap, "%s", env);
+    else if (xdg && *xdg)
+        snprintf(out, cap, "%s/bt-j2me/games", xdg);
+    else
+        snprintf(out, cap, "%s/.local/share/bt-j2me/games", home ? home : ".");
+}
+
+static int is_dir(const char *path)
+{
+    struct stat st;
+
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
 int main(int argc, char **argv)
 {
-    PlatformConfig cfg = { 240, 320, 1, 1, 0, "BT-J2ME" };
+    PlatformConfig cfg = { 240, 320, 1, SCALE_AUTO, 0, "BT-J2ME" };
+    char dir[1024];
 
-    if (argc < 2) {
+    if (argc >= 2 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)) {
         usage();
-        return 2;
+        return 0;
+    }
+    if (argc >= 2 && strcmp(argv[1], "--version") == 0) {
+        puts("BT-J2ME " BT_VERSION);
+        return 0;
+    }
+    if (argc < 2 || argv[1][0] == '-' || is_dir(argv[1])) {
+        int first_opt = argc >= 2 && argv[1][0] != '-' ? 2 : 1;
+
+        if (first_opt == 2)
+            snprintf(dir, sizeof(dir), "%s", argv[1]);
+        else
+            default_games_dir(dir, sizeof(dir));
+        return parse_opts(argc, argv, first_opt, &cfg) ? 2 : launcher_run(dir, &cfg);
     }
     if (strcmp(argv[1], "info") == 0 && argc == 3)
         return cmd_info(argv[2]);
@@ -211,10 +253,6 @@ int main(int argc, char **argv)
             return 1;
         BT_LOG("интерпретатор байткода ещё не реализован (этап 2, см. docs/CONCEPT.md)\n");
         return 3;
-    }
-    if (strcmp(argv[1], "--version") == 0) {
-        puts("BT-J2ME " BT_VERSION);
-        return 0;
     }
     usage();
     return 2;

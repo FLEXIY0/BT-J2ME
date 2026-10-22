@@ -15,7 +15,7 @@ BACKEND  ?= sdl2
 
 CFLAGS   ?= -Os -pipe
 override CFLAGS += -std=c99 -Wall -Wextra -Wno-unused-parameter
-override LDLIBS += -lz
+override LDLIBS += -lz -lm
 
 ifeq ($(BACKEND),sdl2)
 SDL_CFLAGS := $(shell $(PKG) --cflags sdl2 2>/dev/null || sdl2-config --cflags)
@@ -28,7 +28,8 @@ ifeq ($(STATIC),1)
 override LDFLAGS += -static
 endif
 
-SRC := src/main.c src/jar.c src/manifest.c src/classfile.c src/platform_$(BACKEND).c
+SRC := src/main.c src/jar.c src/manifest.c src/classfile.c src/png.c src/gfx.c \
+       src/library.c src/launcher.c src/platform_$(BACKEND).c
 OBJ := $(SRC:.c=.o)
 
 bt-j2me: $(OBJ)
@@ -37,14 +38,22 @@ bt-j2me: $(OBJ)
 src/%.o: src/%.c $(wildcard src/*.h)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-test: bt-j2me
-	sh tests/run.sh ./bt-j2me
+tests/png_dump: tests/png_dump.c src/png.c src/png.h
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/png_dump.c src/png.c -lz
+
+tests/pad_test: tests/pad_test.c src/platform_sdl2.c src/gfx.c $(wildcard src/*.h)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/pad_test.c src/platform_sdl2.c src/gfx.c $(LDLIBS)
+
+TEST_BINS := tests/png_dump $(if $(filter sdl2,$(BACKEND)),tests/pad_test)
+
+test: bt-j2me $(TEST_BINS)
+	BT_BACKEND=$(BACKEND) sh tests/run.sh ./bt-j2me
 
 strip: bt-j2me
 	$(CROSS)strip -s bt-j2me
 
 clean:
-	rm -f bt-j2me src/*.o
+	rm -f bt-j2me src/*.o tests/png_dump tests/pad_test
 	rm -rf tests/out
 
 .PHONY: test strip clean
