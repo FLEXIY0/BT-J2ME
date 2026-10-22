@@ -1,0 +1,4 @@
+/bt-j2me
+*.o
+/build/
+/tests/out/

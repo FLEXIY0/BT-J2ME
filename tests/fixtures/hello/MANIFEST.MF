@@ -1,0 +1,7 @@
+MIDlet-Name: Hello Test
+MIDlet-Vendor: BT-J2ME
+MIDlet-Version: 1.0.0
+MIDlet-1: Hello, /icon.png, com.example.Hel
+ lo
+MicroEdition-Profile: MIDP-2.0
+MicroEdition-Configuration: CLDC-1.1
