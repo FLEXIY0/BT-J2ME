@@ -20,6 +20,8 @@
 /* ---------- состояние запуска ---------- */
 
 #define EVQ_LEN 64
+#define KEY_SLOTS 160   /* коды клавиш MIDP от -16 до 143 */
+#define MIN_PRESS_MS 100
 
 typedef struct {
     int type, a, b;
@@ -36,6 +38,8 @@ static struct {
     Thread   *waiter;
     uint32_t  wait_deadline;
     unsigned  frames;
+    uint32_t  pressed_at[KEY_SLOTS];  /* когда нажали (0 — не нажата) */
+    uint32_t  release_at[KEY_SLOTS];  /* отложенное отпускание (0 — нет) */
     int       g_slots_ready;
     int       s_buf, s_bw, s_bh, s_cx, s_cy, s_cw, s_ch, s_color, s_stroke;
 } M;
@@ -52,6 +56,49 @@ static void evq_push(int type, int a, int b)
     e->type = type;
     e->a = a;
     e->b = b;
+}
+
+/* Игры часто опрашивают клавиши раз в кадр: слишком короткое нажатие они не заметят.
+ * На телефоне кнопку держали минимум 50–100 мс, поэтому отпускание придерживаем. */
+static void key_down(int key, int printable)
+{
+    int k = key + 16;
+
+    if (k >= 0 && k < KEY_SLOTS) {
+        if (M.release_at[k]) {          /* нажали снова, пока ждали отпускания */
+            evq_push(MEV_KEY_UP, key, 0);
+            M.release_at[k] = 0;
+        }
+        M.pressed_at[k] = jvm_now() | 1;
+    }
+    evq_push(MEV_KEY_DOWN, key, printable);
+}
+
+static void key_up(int key)
+{
+    int k = key + 16;
+    uint32_t now = jvm_now();
+
+    if (k >= 0 && k < KEY_SLOTS && M.pressed_at[k] && now - M.pressed_at[k] < MIN_PRESS_MS) {
+        M.release_at[k] = M.pressed_at[k] + MIN_PRESS_MS;
+        return;
+    }
+    if (k >= 0 && k < KEY_SLOTS)
+        M.pressed_at[k] = 0;
+    evq_push(MEV_KEY_UP, key, 0);
+}
+
+static void deliver_releases(void)
+{
+    uint32_t now = jvm_now();
+    int k;
+
+    for (k = 0; k < KEY_SLOTS; k++)
+        if (M.release_at[k] && (int32_t)(now - M.release_at[k]) >= 0) {
+            M.release_at[k] = 0;
+            M.pressed_at[k] = 0;
+            evq_push(MEV_KEY_UP, k - 16, 0);
+        }
 }
 
 /* ---------- контекст рисования из полей объекта Graphics ---------- */
@@ -979,10 +1026,10 @@ MidpResult midp_run(const char *jar, const char *save_id, ScaleMode scale, char 
                 }
                 break;
             case EV_KEY_DOWN:
-                evq_push(MEV_KEY_DOWN, ev.key, ev.printable);
+                key_down(ev.key, ev.printable);
                 break;
             case EV_KEY_UP:
-                evq_push(MEV_KEY_UP, ev.key, 0);
+                key_up(ev.key);
                 break;
             case EV_POINTER_DOWN:
                 evq_push(MEV_PTR_DOWN, ev.x, ev.y);
@@ -1000,6 +1047,7 @@ MidpResult midp_run(const char *jar, const char *save_id, ScaleMode scale, char 
                 break;
             }
         }
+        deliver_releases();
         if (M.q_len)
             jvm_wake_event_waiters();
         if (user_exit && (int32_t)(jvm_now() - exit_deadline) >= 0)
