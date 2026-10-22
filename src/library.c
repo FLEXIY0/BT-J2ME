@@ -6,6 +6,7 @@
 #include "util.h"
 
 #include <dirent.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -163,34 +164,36 @@ static uint32_t hsv(unsigned h, unsigned s, unsigned v)   /* h 0..359, s/v 0..25
     return 0xFF000000u | (r << 16) | (g << 8) | b;
 }
 
-/* Обложка «как в магазине дисков»: цветной фон по хэшу названия, полоса с платформой,
- * крупная пиксельная иконка игры и название внизу. */
+/* Обложка без надписей: цветной фон по хэшу названия, полиграфическая штриховка,
+ * «логотип-овал» сверху и крупная пиксельная иконка игры (или диск, если иконки нет). */
 static Image make_cover(const Game *g, int w, int h)
 {
     Image c = image_new(w, h);
     uint32_t hs = name_hash(g->name);
     unsigned hue = hs % 360;
-    uint32_t top = hsv(hue, 170, 150), bottom = hsv((hue + 40) % 360, 200, 60), ink = 0xFFF2F2F2u;
-    int band = h / 7, y, k, tw;
-    char line[160];
+    uint32_t top = hsv(hue, 150, 170), bottom = hsv((hue + 35) % 360, 190, 70);
+    int y, k, band = h / 6, ow, oh;
 
     if (!c.px)
         return c;
     gfx_vgradient(&c, 0, 0, w, h, top, bottom);
-    /* Диагональные полосы — фактура «полиграфии» */
     for (y = 0; y < h; y++)
-        for (k = (y + (int)(hs >> 9) % 16) % 16; k < w; k += 16)
-            gfx_fill(&c, k, y, 4, 1, 0x14FFFFFFu);
-
-    gfx_fill(&c, 0, 0, w, band, 0xE0101014u);
-    gfx_text(&c, &font_small, 4, (band - font_small.h) / 2, "J2ME", 0xFFFFD54Fu, 1);
-    snprintf(line, sizeof(line), "%s", g->profile[0] ? g->profile : "MIDP");
-    gfx_text(&c, &font_small, w - 4 - gfx_text_width(&font_small, line, 1), (band - font_small.h) / 2, line,
-             0xFFB0B6C0u, 1);
+        for (k = (y + (int)(hs >> 9) % 12) % 12; k < w; k += 12)
+            gfx_fill(&c, k, y, 3, 1, 0x16FFFFFFu);
+    /* полоса-«шапка» с овальным значком, как у коробок приставок */
+    gfx_fill(&c, 0, 0, w, band, 0x50000000u);
+    ow = w / 2;
+    oh = band * 3 / 5;
+    for (y = 0; y < oh; y++) {
+        int dy = y * 2 - oh + 1, half = (int)((float)ow / 2 * sqrtf(1.0f - (float)(dy * dy) / (float)(oh * oh)));
+        gfx_fill(&c, w / 2 - half, (band - oh) / 2 + y, half * 2, 1, hsv((hue + 180) % 360, 120, 230));
+    }
+    gfx_fill(&c, w / 2 - ow / 4, band / 2 - 1, ow / 2, 2, 0x60FFFFFFu);
 
     if (g->icon.px) {
-        /* Целый множитель, чтобы пиксель-арт иконки остался ровным. */
-        int area = h - band * 3, s = area / (g->icon.h > g->icon.w ? g->icon.h : g->icon.w);
+        /* целый множитель, чтобы пиксель-арт иконки остался ровным */
+        int area_w = w * 3 / 4, area_h = h - band * 2;
+        int s = area_w / g->icon.w < area_h / g->icon.h ? area_w / g->icon.w : area_h / g->icon.h;
         int iw, ih, ix, iy;
 
         if (s < 1)
@@ -198,28 +201,33 @@ static Image make_cover(const Game *g, int w, int h)
         iw = g->icon.w * s;
         ih = g->icon.h * s;
         ix = (w - iw) / 2;
-        iy = band + (area + band - ih) / 2;
-        gfx_fill(&c, ix - 3, iy - 3, iw + 6, ih + 6, 0x40000000u);
+        iy = band + (h - band - ih) / 2;
+        gfx_fill(&c, ix + 2, iy + 3, iw, ih, 0x40000000u);
         gfx_blit_scaled(&c, &g->icon, ix, iy, iw, ih, 255);
     } else {
-        gfx_disc(&c, w / 2, band + (h - band * 2) / 2, (h - band * 3) / 3, (float)(hs % 100) / 100.0f, 255);
+        gfx_disc(&c, w / 2, band + (h - band) / 2, w / 3, (float)(hs % 100) / 100.0f, 255);
     }
-
-    /* Название: если не влезает — обрезаем по символам. */
-    snprintf(line, sizeof(line), "%s", g->name);
-    while ((tw = gfx_text_width(&font_small, line, 1)) > w - 8 && strlen(line) > 1) {
-        size_t n = strlen(line);
-        unsigned char ch;
-
-        /* убираем последний символ целиком, вместе с байтами продолжения UTF-8 */
-        do
-            ch = (unsigned char)line[--n];
-        while (n && (ch & 0xC0) == 0x80);
-        line[n] = '\0';
-    }
-    gfx_fill(&c, 0, h - band, w, band, 0xC0000000u);
-    gfx_text(&c, &font_small, (w - tw) / 2, h - band + (band - font_small.h) / 2, line, ink, 1);
+    /* нижняя «плашка» без текста — чтобы коробка выглядела законченной */
+    gfx_fill(&c, 0, h - h / 14, w, h / 14, 0x40000000u);
     return c;
+}
+
+/* Вырезает из картинки центральную часть нужных пропорций — обложка заполняет бокс без искажений. */
+static Image crop_to_aspect(const Image *src, int w, int h)
+{
+    int cw = src->w, ch = src->w * h / w, x0, y0, y;
+    Image out;
+
+    if (ch > src->h) {
+        ch = src->h;
+        cw = src->h * w / h;
+    }
+    x0 = (src->w - cw) / 2;
+    y0 = (src->h - ch) / 2;
+    out = image_new(cw, ch);
+    for (y = 0; out.px && y < ch; y++)
+        memcpy(out.px + (size_t)y * cw, src->px + (size_t)(y0 + y) * src->w + x0, (size_t)cw * sizeof(uint32_t));
+    return out;
 }
 
 void library_load_cover(const Library *lib, Game *g, int w, int h)
@@ -235,7 +243,9 @@ void library_load_cover(const Library *lib, Game *g, int w, int h)
     }
     image_free(&g->cover);
     if (src.px) {
-        g->cover = image_resize(&src, w, h);
+        Image crop = crop_to_aspect(&src, w, h);
+        g->cover = image_resize(crop.px ? &crop : &src, w, h);
+        image_free(&crop);
         g->cover_custom = 1;
         image_free(&src);
     } else {
