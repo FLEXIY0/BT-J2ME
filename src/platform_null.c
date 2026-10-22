@@ -55,3 +55,14 @@ void platform_sleep_ms(uint32_t ms)
     ts.tv_nsec = (long)(ms % 1000) * 1000000L;
     nanosleep(&ts, NULL);
 }
+
+/* Звуковой карты нет: audio.c сам ведёт время звуков по часам (audio_pump). */
+int platform_audio_open(int rate, AudioMixFn mix)
+{
+    (void)rate;
+    (void)mix;
+    return 0;
+}
+
+void platform_audio_lock(int on) { (void)on; }
+void platform_audio_close(void) {}

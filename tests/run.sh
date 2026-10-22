@@ -50,7 +50,7 @@ else
     printf 'MIDlet-1: MidpTest, , MidpTest\nMIDlet-Name: MidpTest\nMIDlet-Vendor: BT-J2ME\nMIDlet-Version: 1.0\n' > "$OUT/midp.mf"
     (cd "$OUT/midp" && jar cfm "$OUT/midptest.jar" "$OUT/midp.mf" .)
     if [ "${BT_BACKEND:-sdl2}" = sdl2 ]; then
-        check "MIDP" 0 "MIDP DONE passed=[0-9]* fails=0" env SDL_VIDEODRIVER=dummy XDG_DATA_HOME="$OUT/xdg" \
+        check "MIDP" 0 "MIDP DONE passed=[0-9]* fails=0" env SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy XDG_DATA_HOME="$OUT/xdg" \
             timeout 30 "$BIN" run "$OUT/midptest.jar" --windowed
     fi
 

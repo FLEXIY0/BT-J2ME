@@ -1,3 +1,4 @@
+#include "audio.h"
 #include "classfile.h"
 #include "jar.h"
 #include "jvm.h"
@@ -27,14 +28,18 @@ static void usage(void)
         "                                   $BT_J2ME_GAMES или ~/.local/share/bt-j2me/games)\n"
         "  bt-j2me info <игра.jar>          сведения о MIDlet и проверка классов\n"
         "  bt-j2me run <игра.jar> [опции]   запустить игру сразу, без меню\n"
-        "  bt-j2me display-test [опции]     проверка экрана и клавиш\n\n"
+        "  bt-j2me display-test [опции]     проверка экрана и клавиш\n"
+        "  bt-j2me audio-render <звук> <out.wav> [--ott]\n"
+        "                                   сыграть MIDI/WAV/AU/тоны/OTT в WAV-файл\n\n"
         "Опции:\n"
         "  -s WxH        виртуальный экран (по умолчанию 240x320)\n"
         "  --windowed    в окне вместо полного экрана\n"
         "  --smooth      дробное масштабирование (по умолчанию — авто)\n"
         "  --sharp       только целое масштабирование\n"
         "  --gpu         рисовать через видеокарту (OpenGL); по умолчанию — программно,\n"
-        "                это легче по памяти и надёжнее на старых ПК\n");
+        "                это легче по памяти и надёжнее на старых ПК\n"
+        "  --mute        без звука\n\n"
+        "BT_AUDIO_DUMP=файл.wav — записывать весь звук игры в файл.\n");
 }
 
 static int cmd_info(const char *path)
@@ -199,6 +204,8 @@ static int parse_opts(int argc, char **argv, int start, PlatformConfig *cfg)
             cfg->software = 1;
         } else if (strcmp(argv[i], "--gpu") == 0) {
             cfg->software = 0;
+        } else if (strcmp(argv[i], "--mute") == 0) {
+            audio_set_master(0);
         } else {
             BT_LOG("неизвестная опция: %s\n", argv[i]);
             return -1;
@@ -268,6 +275,14 @@ int main(int argc, char **argv)
     }
     if (argc == 4 && strcmp(argv[1], "jvm-run") == 0)
         return cmd_jvm_run(argv[2], argv[3]);
+    if ((argc == 4 || argc == 5) && strcmp(argv[1], "audio-render") == 0) {
+        int ott = argc == 5 && strcmp(argv[4], "--ott") == 0;
+        if (audio_render_file(argv[2], argv[3], ott ? SND_OTT : SND_AUTO)) {
+            BT_LOG("%s: не удалось разобрать или записать звук\n", argv[2]);
+            return 1;
+        }
+        return 0;
+    }
     if (argc == 3 && strcmp(argv[1], "dump-rt") == 0)
         return cmd_dump_rt(argv[2]);
     if (argc >= 2 && strcmp(argv[1], "--version") == 0) {

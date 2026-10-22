@@ -16,6 +16,8 @@ static ScaleMode     scale_mode;
 static Event         queue[QUEUE_LEN];
 static int           q_head, q_len;
 static int           stick_dir[4];   /* вверх, вниз, влево, вправо */
+static SDL_AudioDeviceID audio_dev;
+static AudioMixFn    audio_mix;
 
 static void push(EventType type, int key)
 {
@@ -124,6 +126,7 @@ int platform_init(const PlatformConfig *cfg)
 
 void platform_shutdown(void)
 {
+    platform_audio_close();
     image_free(&screen);
     if (tex)
         SDL_DestroyTexture(tex);
@@ -315,4 +318,59 @@ uint32_t platform_ticks_ms(void)
 void platform_sleep_ms(uint32_t ms)
 {
     SDL_Delay(ms);
+}
+
+/* ---------- звук ---------- */
+
+static void SDLCALL audio_cb(void *ud, Uint8 *stream, int len)
+{
+    (void)ud;
+    audio_mix((int16_t *)stream, len / 2);
+}
+
+int platform_audio_open(int rate, AudioMixFn mix)
+{
+    SDL_AudioSpec want, have;
+
+    if (audio_dev)
+        return 0;
+    if (!SDL_WasInit(SDL_INIT_AUDIO) && SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
+        BT_LOG("звук недоступен: %s\n", SDL_GetError());
+        return 0;
+    }
+    SDL_zero(want);
+    want.freq = rate;
+    want.format = AUDIO_S16SYS;
+    want.channels = 1;
+    want.samples = 1024;    /* ~46 мс: без треска на слабых машинах, задержка незаметна */
+    want.callback = audio_cb;
+    audio_mix = mix;
+    /* частоту подстраиваем под карту сами, формат и каналы пусть конвертирует SDL */
+    audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
+    if (!audio_dev) {
+        BT_LOG("не удалось открыть звук: %s\n", SDL_GetError());
+        SDL_QuitSubSystem(SDL_INIT_AUDIO);
+        return 0;
+    }
+    SDL_PauseAudioDevice(audio_dev, 0);
+    return have.freq;
+}
+
+void platform_audio_lock(int on)
+{
+    if (!audio_dev)
+        return;
+    if (on)
+        SDL_LockAudioDevice(audio_dev);
+    else
+        SDL_UnlockAudioDevice(audio_dev);
+}
+
+void platform_audio_close(void)
+{
+    if (!audio_dev)
+        return;
+    SDL_CloseAudioDevice(audio_dev);
+    audio_dev = 0;
+    SDL_QuitSubSystem(SDL_INIT_AUDIO);
 }

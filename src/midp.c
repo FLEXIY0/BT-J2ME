@@ -2,6 +2,7 @@
  * события ввода, сохранения RMS и цикл, который крутит Java-машину вместе с экраном. */
 #define _DEFAULT_SOURCE
 #include "midp.h"
+#include "audio.h"
 #include "gfx.h"
 #include "jvm.h"
 #include "manifest.h"
@@ -877,6 +878,42 @@ static int n_rmsList(Thread *t, Value *a, Value *r)
     return NATIVE_OK;
 }
 
+/* ---------- звук (audio.c) ---------- */
+
+static int s_create(Thread *t, Value *a, Value *r)
+{
+    Object *d = a[0].l;
+
+    (void)t;
+    r->i = snd_create(d ? ARR_OF(d, uint8_t) : NULL, d ? (size_t)d->length : 0, a[1].i == 1 ? SND_OTT : SND_AUTO);
+    return NATIVE_OK;
+}
+
+static int s_createFreq(Thread *t, Value *a, Value *r)
+{
+    (void)t;
+    r->i = snd_create_freq(a[0].i, a[1].i);
+    return NATIVE_OK;
+}
+
+static int s_free(Thread *t, Value *a, Value *r)    { (void)t; (void)r; snd_free(a[0].i); return NATIVE_OK; }
+static int s_play(Thread *t, Value *a, Value *r)    { (void)t; (void)r; snd_play(a[0].i); return NATIVE_OK; }
+static int s_pause(Thread *t, Value *a, Value *r)   { (void)t; (void)r; snd_pause(a[0].i); return NATIVE_OK; }
+static int s_playing(Thread *t, Value *a, Value *r) { (void)t; r->i = snd_playing(a[0].i); return NATIVE_OK; }
+static int s_loops(Thread *t, Value *a, Value *r)   { (void)t; (void)r; snd_set_loops(a[0].i, a[1].i); return NATIVE_OK; }
+static int s_volume(Thread *t, Value *a, Value *r)  { (void)t; (void)r; snd_set_volume(a[0].i, a[1].i); return NATIVE_OK; }
+static int s_time(Thread *t, Value *a, Value *r)    { (void)t; r->j = snd_time_us(a[0].i); return NATIVE_OK; }
+static int s_seek(Thread *t, Value *a, Value *r)    { (void)t; r->j = snd_seek_us(a[0].i, a[1].j); return NATIVE_OK; }
+static int s_duration(Thread *t, Value *a, Value *r) { (void)t; r->j = snd_duration_us(a[0].i); return NATIVE_OK; }
+
+static int s_tone(Thread *t, Value *a, Value *r)
+{
+    (void)t;
+    (void)r;
+    snd_tone(a[0].i, a[1].i, a[2].i);
+    return NATIVE_OK;
+}
+
 static const NativeDef midp_natives[] = {
     { "javax/microedition/lcdui/Graphics", "fill0", NULL, g_fill0 },
     { "javax/microedition/lcdui/Graphics", "line0", NULL, g_line0 },
@@ -902,6 +939,18 @@ static const NativeDef midp_natives[] = {
     { "btvm/Native", "rmsSave", NULL, n_rmsSave },
     { "btvm/Native", "rmsDelete", NULL, n_rmsDelete },
     { "btvm/Native", "rmsList", NULL, n_rmsList },
+    { "btvm/Native", "sndCreate", NULL, s_create },
+    { "btvm/Native", "sndCreateFreq", NULL, s_createFreq },
+    { "btvm/Native", "sndFree", NULL, s_free },
+    { "btvm/Native", "sndPlay", NULL, s_play },
+    { "btvm/Native", "sndPause", NULL, s_pause },
+    { "btvm/Native", "sndPlaying", NULL, s_playing },
+    { "btvm/Native", "sndLoops", NULL, s_loops },
+    { "btvm/Native", "sndVolume", NULL, s_volume },
+    { "btvm/Native", "sndTime", NULL, s_time },
+    { "btvm/Native", "sndSeek", NULL, s_seek },
+    { "btvm/Native", "sndDuration", NULL, s_duration },
+    { "btvm/Native", "sndTone", NULL, s_tone },
     { NULL, NULL, NULL, NULL }
 };
 
@@ -1048,6 +1097,7 @@ MidpResult midp_run(const char *jar, const char *save_id, ScaleMode scale, char 
             }
         }
         deliver_releases();
+        audio_pump();
         if (M.q_len)
             jvm_wake_event_waiters();
         if (user_exit && (int32_t)(jvm_now() - exit_deadline) >= 0)
@@ -1064,6 +1114,7 @@ MidpResult midp_run(const char *jar, const char *save_id, ScaleMode scale, char 
     }
 
 out:
+    audio_reset();     /* до jvm_destroy: звуки игры больше никому не нужны */
     if (M.have_mf)
         manifest_free(&M.mf);
     if (M.have_jad)
