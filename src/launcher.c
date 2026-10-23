@@ -942,14 +942,32 @@ static void launch_fx(Ui *ui, float t, uint32_t now)
     }
     default: {
         /* Запуск по шагам, чтобы каждое действие читалось:
-         * 0–0.08   отклик: коробка проседает под пальцем, от неё идёт ударная волна;
-         * 0.03–0.42 полка осыпается плитками за волной, коробка стоит и светится;
-         * 0.42–0.55 пауза: коробка одна в темноте, с ореолом, отрывается и чуть поворачивается;
-         * 0.55–0.9  выплывает в центр, растёт, раскручивается и растворяется в искры;
-         * 0.9–1     темнота перед игрой. */
-        static const uint8_t bayer[16] = { 0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5 };
-        int b = imax(6, ui->W / 12), x, y;
-        float maxd = sqrtf((float)(ui->W * ui->W + ui->H * ui->H)), wave = smooth((t - 0.02f) / 0.32f);
+         * 0–0.18   удар: коробка проседает, экран вздрагивает, от неё идёт ударная волна;
+         * 0.03–0.42 полка осыпается плитками за волной, за коробкой разгораются лучи;
+         * 0.4–0.5   коробка одна в темноте отрывается от полки;
+         * 0.5–0.8   выплывает в центр, растёт и делает два оборота, замедляясь лицом к игроку;
+         * 0.8–0.86  встаёт с лёгким покачиванием, по обложке пробегает блик (тут звучит аккорд);
+         * 0.85–0.97 рассыпается в светящиеся частицы, они уплывают вверх;
+         * 0.93–1    темнота; игра потом проявляется из неё сама (platform_fade_in). */
+        static int buzzed;
+        int b = imax(6, ui->W / 12), x, y, shx, shy;
+        float maxd = sqrtf((float)(ui->W * ui->W + ui->H * ui->H)), wave = smooth((t - 0.02f) / 0.3f);
+        float u = (float)imin(ui->W, ui->H) / 240.0f, quake = 1 - smooth(t / 0.18f);
+        float go = smooth((t - 0.48f) / 0.3f), lift = smooth((t - 0.4f) / 0.1f);
+        float spin = clampf((t - 0.5f) / 0.3f, 0, 1), ang = 6.2832f * 2 * spin * spin * (3 - 2 * spin);
+        float settle = t > 0.8f ? sinf((t - 0.8f) / 0.07f * 3.1416f) * (1 - smooth((t - 0.8f) / 0.08f)) : 0;
+        float press = t < 0.08f ? sinf(t / 0.08f * 3.1416f) : 0;
+        float dis = clampf((t - 0.85f) / 0.1f, 0, 1);
+        float ccx, ccy, k, glow, rays;
+
+        shx = (int)(sinf(t * 140) * 5 * u * quake);
+        shy = (int)(cosf(t * 110) * 4 * u * quake);
+        if (t < 0.1f)
+            buzzed = 0;
+        else if (t > 0.8f && !buzzed) {     /* коробка встала — короткий толчок в руку */
+            buzzed = 1;
+            platform_vibrate(18);
+        }
         gfx_fill(s, 0, 0, ui->W, ui->H, 0xFF0B0A10u);
         for (y = 0; y < ui->H; y += b)
             for (x = 0; x < ui->W; x += b) {
@@ -972,44 +990,63 @@ static void launch_fx(Ui *ui, float t, uint32_t now)
                 oy = (vy * lt + 2.8f * lt * lt) * (float)ui->H * 0.3f;
                 sc = 1 - lt * 0.5f;
                 sz = imax(1, (int)((float)b * sc));
-                fx_stretch_ex(s, src, x, y, b, b, (int)(mx + ox - (float)sz / 2), (int)(my + oy - (float)sz / 2),
-                              sz, sz, bx, by, bw, bh);
+                fx_stretch_ex(s, src, x, y, b, b, (int)(mx + ox - (float)sz / 2) + shx,
+                              (int)(my + oy - (float)sz / 2) + shy, sz, sz, bx, by, bw, bh);
+                if (lt > 0)                 /* летящая плитка темнеет — уходит в глубину */
+                    gfx_fill(s, (int)(mx + ox - (float)sz / 2) + shx, (int)(my + oy - (float)sz / 2) + shy, sz, sz,
+                             ((uint32_t)(lt * 200) << 24) | 0x0B0A10);
             }
-        if (wave > 0 && wave < 1) {         /* ударная волна — кольцо от коробки */
+        if (wave > 0 && wave < 1) {         /* ударная волна — кольцо с мягким следом */
             float rr = wave * maxd;
-            int k;
-            for (k = 0; k < 360; k += 2) {
-                float a = (float)k * 0.01745f;
-                fx_line(s, cx + cosf(a) * (rr - 3), cy + sinf(a) * (rr - 3), cx + cosf(a) * rr, cy + sinf(a) * rr,
-                        0xF4F0FF, (unsigned)(200 * (1 - wave)));
+            int k2, ring;
+            for (ring = 0; ring < 3; ring++)
+                for (k2 = 0; k2 < 360; k2 += 1 + ring) {
+                    float a = (float)k2 * 0.01745f, r0 = rr - (float)ring * 7 * u;
+                    if (r0 <= 0)
+                        continue;
+                    fx_line(s, cx + cosf(a) * (r0 - 3 * u) + (float)shx, cy + sinf(a) * (r0 - 3 * u) + (float)shy,
+                            cx + cosf(a) * r0 + (float)shx, cy + sinf(a) * r0 + (float)shy,
+                            ring ? 0x9C8FF0 : 0xF4F0FF, (unsigned)((ring ? 90 : 230) * (1 - wave) / (1 + ring)));
+                }
+        }
+        if (t < 0.07f)                      /* вспышка удара */
+            fx_flash(s, 0.22f * (1 - t / 0.07f));
+
+        ccx = cx + ((float)ui->W / 2 - cx) * go + (float)shx;
+        ccy = cy - lift * (float)bh * 0.08f + ((float)ui->H / 2 - cy) * go + press * 3 * u + (float)shy;
+        k = (1 - 0.05f * press) * (1 + 0.45f * go) * (1 + 0.05f * settle) * (1 + 0.12f * smooth(dis));
+        glow = smooth((t - 0.08f) / 0.3f) * (1 - smooth(dis * 1.4f)) + 0.6f * (dis > 0 ? 1 - dis : 0);
+        rays = smooth((t - 0.15f) / 0.3f) * (1 - smooth((t - 0.86f) / 0.08f));
+        if (rays > 0) {                     /* лучи из-за коробки медленно вращаются */
+            int i2, w2;
+            float len = maxd * 0.75f;
+            for (i2 = 0; i2 < 18; i2++) {
+                float a = t * 0.9f + (float)i2 * 6.2832f / 18;
+                for (w2 = -4; w2 <= 4; w2++) {
+                    float aa = a + (float)w2 * 0.011f;
+                    fx_line(s, ccx + cosf(aa) * len, ccy + sinf(aa) * len, ccx, ccy,
+                            i2 % 2 ? 0x9C8FF0 : 0xF4F0FF, (unsigned)(rays * (i2 % 2 ? 26 : 18) * (5 - abs(w2)) / 5));
+                }
+            }
+        }
+        if (glow > 0) {                     /* ореол — мягкое свечение за коробкой */
+            int rmax = (int)((float)imax(bw, bh) * k * 1.05f), r;
+            for (r = rmax; r > 0; r -= 2) {
+                float f = 1 - (float)r / (float)rmax;
+                unsigned al = (unsigned)(clampf(glow, 0, 1) * f * f * 110);
+                int st, n = imax(24, r / 2);
+                for (st = 0; st < n; st++) {
+                    float a = (float)st * 6.2832f / (float)n;
+                    px_blend(s, (int)(ccx + cosf(a) * (float)r), (int)(ccy + sinf(a) * (float)r), 0xB6ACFF, al);
+                }
             }
         }
         {
-            float go = smooth((t - 0.55f) / 0.3f), lift = smooth((t - 0.42f) / 0.13f);
-            float ang = t > 0.55f ? 6.2832f * 1.6f * (t - 0.55f) * (t - 0.55f) / 0.1225f : 0;
-            float press = t < 0.08f ? sinf(t / 0.08f * 3.1416f) : 0;     /* проседание под пальцем */
-            float ccx = cx + ((float)ui->W / 2 - cx) * go;
-            float ccy = cy - lift * (float)bh * 0.06f + ((float)ui->H / 2 - cy) * go + press * 3;
-            float k = (1 - 0.05f * press) * (1 + 0.45f * go), cs = cosf(ang);
-            float dis = smooth((t - 0.72f) / 0.18f), glow = smooth((t - 0.1f) / 0.3f) * (1 - dis);
-            /* перспектива: край, что «ближе», выше дальнего — так поворот читается как объём */
-            float persp = 0.22f * sinf(ang);
+            float cs = cosf(ang), persp = 0.2f * sinf(ang);
+            float shine = clampf((t - 0.79f) / 0.08f, 0, 1);
             int ww = (int)((float)bw * k * fabsf(cs)), hh = (int)((float)bh * k), x0, i, j;
-            /* ореол: мягкое свечение за коробкой */
-            if (glow > 0) {
-                int rmax = (int)((float)imax(bw, bh) * k * 0.9f), r;
-                for (r = rmax; r > 0; r -= 2) {
-                    float f = 1 - (float)r / (float)rmax;
-                    unsigned al = (unsigned)(glow * f * f * 60);
-                    int st;
-                    for (st = 0; st < 64; st++) {
-                        float a = (float)st * 6.2832f / 64;
-                        px_blend(s, (int)(ccx + cosf(a) * (float)r), (int)(ccy + sinf(a) * (float)r), 0x9C8FF0, al);
-                    }
-                }
-            }
+            int pb = imax(2, bw / 22);      /* частицы — квадраты pb×pb обложки */
             x0 = (int)(ccx - (float)ww / 2);
-            fx_seed = (uint32_t)(now / 40);
             for (i = 0; i < ww; i++) {
                 int px = x0 + i, sx2 = cs >= 0 ? bx + i * bw / ww : bx + bw - 1 - i * bw / ww;
                 float colk = 1 + persp * ((float)i / (float)ww - 0.5f) * 2;
@@ -1018,27 +1055,58 @@ static void launch_fx(Ui *ui, float t, uint32_t now)
                     continue;
                 for (j = 0; j < ch; j++) {
                     int py = cy0 + j, sy2 = by + j * bh / ch;
-                    uint32_t c;
+                    uint32_t c, h;
                     if (py < 0 || py >= ui->H || sy2 < 0 || sy2 >= ui->H)
                         continue;
-                    c = src->px[sy2 * ui->W + sx2];
-                    if ((float)bayer[(py & 3) * 4 + (px & 3)] / 16.0f < dis) {
-                        /* растворился пиксель — иногда он вспыхивает искрой и улетает вверх */
-                        if ((fx_rand() & 63) == 0)
-                            px_blend(s, px + (int)((fx_frand() - 0.5f) * 6), py - (int)(fx_frand() * 18 * dis),
-                                     0xF4F0FF, 220);
-                        continue;
+                    if (dis > 0) {          /* квадрат уже улетел частицей */
+                        h = (uint32_t)((sx2 - bx) / pb * 73856093u ^ (sy2 - by) / pb * 19349663u);
+                        h = (h ^ (h >> 13)) * 0x5bd1e995u;
+                        if ((float)((h >> 8) & 1023) / 1024.0f * 0.7f + (1 - (float)(sy2 - by) / (float)bh) * 0.3f < dis)
+                            continue;
                     }
+                    c = src->px[sy2 * ui->W + sx2];
                     if (cs < 0)             /* обратная сторона коробки темнее */
                         c = 0xFF000000u | ((c >> 1) & 0x7F7F7Fu);
                     if (fabsf(cs) < 0.35f)  /* на ребре — блик */
                         c = gfx_mix(c, 0xFFF4F0FFu, (unsigned)((0.35f - fabsf(cs)) / 0.35f * 170));
+                    if (shine > 0 && shine < 1) {   /* косой блик пробегает по обложке */
+                        float band = (float)i / (float)ww + (float)j / (float)ch * 0.5f - (shine * 1.9f - 0.2f);
+                        if (band > -0.12f && band < 0.12f)
+                            c = gfx_mix(c, 0xFFFFFFFFu, (unsigned)((0.12f - fabsf(band)) / 0.12f * 150));
+                    }
+                    if (dis > 0)            /* перед распадом обложка накаляется */
+                        c = gfx_mix(c, 0xFFE8E2FFu, (unsigned)(dis * 120));
                     s->px[py * ui->W + px] = c;
                 }
             }
+            if (dis > 0 && ww > 0) {        /* частицы: каждый улетевший квадрат светится и всплывает */
+                int qx, qy;
+                for (qy = 0; qy < bh; qy += pb)
+                    for (qx = 0; qx < bw; qx += pb) {
+                        uint32_t h = (uint32_t)(qx / pb * 73856093u ^ qy / pb * 19349663u), c;
+                        float when, age, dx, dy, ps;
+                        int sz2, ppx, ppy;
+                        h = (h ^ (h >> 13)) * 0x5bd1e995u;
+                        when = (float)((h >> 8) & 1023) / 1024.0f * 0.7f + (1 - (float)qy / (float)bh) * 0.3f;
+                        age = (dis - when) / 0.35f;
+                        if (age <= 0 || age >= 1)
+                            continue;
+                        dx = ((float)((h >> 18) & 255) / 255.0f - 0.5f) * 40 * u * age;
+                        dy = -(16 + (float)((h >> 4) & 15) * 3) * u * age * (0.6f + age);
+                        ps = (float)pb * k * (1 - age * 0.7f);
+                        sz2 = imax(1, (int)ps);
+                        ppx = (int)(ccx + ((float)qx - (float)bw / 2) * k + dx);
+                        ppy = (int)(ccy + ((float)qy - (float)bh / 2) * k + dy);
+                        c = src->px[imin(ui->H - 1, by + qy) * ui->W + imin(ui->W - 1, bx + qx)];
+                        c = gfx_mix(c, 0xFFF4F0FFu, (unsigned)(100 + age * 155));
+                        for (y = 0; y < sz2; y++)
+                            for (x = 0; x < sz2; x++)
+                                px_blend(s, ppx + x, ppy + y, c, (unsigned)((1 - age) * 255));
+                    }
+            }
         }
-        if (t > 0.9f)
-            gfx_fill(s, 0, 0, ui->W, ui->H, ((uint32_t)(smooth((t - 0.9f) / 0.1f) * 255) << 24));
+        if (t > 0.93f)
+            gfx_fill(s, 0, 0, ui->W, ui->H, ((uint32_t)(smooth((t - 0.93f) / 0.07f) * 255) << 24));
         break;
     }
     }
@@ -1048,9 +1116,10 @@ static void launch_fx(Ui *ui, float t, uint32_t now)
 /* Нажали «играть»: отклик вибрацией и короткий «загрузочный» аккорд, как у приставок. */
 static void start_launch(Ui *ui, uint32_t now)
 {
-    /* тоновая последовательность JSR-135: темп 240, единица 1/64; арпеджио, пауза, финальный звон */
+    /* тоновая последовательность JSR-135: темп 240, единица 1/64 (≈16 мс); арпеджио на ударе,
+     * пауза, финальный звон — ровно когда коробка встаёт лицом к игроку */
     static const uint8_t chime[] = { 0xFE, 1, 0xFD, 60, 0xFC, 64,
-                                     67, 6, 72, 6, 76, 6, 79, 6, 84, 14, 0xFF, 92, 88, 22, 91, 30 };
+                                     67, 6, 72, 6, 76, 6, 79, 6, 84, 14, 0xFF, 129, 88, 22, 91, 30 };
     ui->launch_t0 = now;
     platform_vibrate(25);
     snd_play_once(chime, sizeof(chime), 55);
@@ -1082,8 +1151,12 @@ static int run_game(Ui *ui, Game *g)
 {
     ScaleMode mode = ui->cli_scale != SCALE_AUTO ? ui->cli_scale : ui->set.sharp ? SCALE_INTEGER : SCALE_AUTO;
     char err[200];
-    MidpResult r = midp_run(g->path, g->base, mode, err, sizeof(err));
+    MidpResult r;
     uint32_t until;
+
+    if (ui->fx == FX_SHATTER)
+        platform_fade_in(700);     /* анимация ушла в черноту — игра из неё проявляется */
+    r = midp_run(g->path, g->base, mode, err, sizeof(err));
 
     if (r == MIDP_QUIT)
         return 1;

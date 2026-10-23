@@ -184,6 +184,15 @@ Image *platform_screen(void)
     return &screen;
 }
 
+static int      fade_ms;
+static uint32_t fade_t0;
+
+void platform_fade_in(int ms)
+{
+    fade_ms = ms;
+    fade_t0 = 0;        /* отсчёт — с первого кадра игры: JVM ещё грузится */
+}
+
 static void render(void)
 {
     SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);   /* поля вокруг экрана — чёрные */
@@ -197,6 +206,20 @@ static void render(void)
         touch_draw();
     } else
         SDL_RenderCopy(ren, tex, NULL, NULL);
+    if (fade_ms > 0) {
+        uint32_t now = SDL_GetTicks();
+        float f;
+        if (!fade_t0)
+            fade_t0 = now;
+        f = 1 - (float)(now - fade_t0) / (float)fade_ms;
+        if (f <= 0) {
+            fade_ms = 0;
+        } else {
+            SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+            SDL_SetRenderDrawColor(ren, 0, 0, 0, (Uint8)(f * f * 255));
+            SDL_RenderFillRect(ren, NULL);
+        }
+    }
     SDL_RenderPresent(ren);
 }
 
@@ -479,8 +502,8 @@ int platform_poll(Event *ev)
         if (touch_take_shot())
             push(EV_SCREENSHOT, 0);
     }
-    if (touch_on && touch_dirty() && tex)
-        render();       /* кнопка нажалась или стик сдвинулся, а игра кадр не прислала */
+    if (((touch_on && touch_dirty()) || (fade_ms > 0 && fade_t0)) && tex)
+        render();       /* кнопка нажалась, стик сдвинулся или игра проявляется, а кадр игра не прислала */       /* кнопка нажалась или стик сдвинулся, а игра кадр не прислала */
     if (!q_len)
         return 0;
     *ev = queue[q_head];

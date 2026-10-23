@@ -895,8 +895,11 @@ static int in_stick_zone(float x, float y)
         return 0;
     r = elem_rect(&cur()->e[i]);
     ext = r.w * 0.45f;
-    return x >= r.x - ext && x < r.x + r.w + ext && y >= r.y - ext && y < r.y + r.h + ext &&
-           !inside(T.g, x, y, 0) ;
+    if (!(x >= r.x - ext && x < r.x + r.w + ext && y >= r.y - ext && y < r.y + r.h + ext))
+        return 0;
+    /* Обычно касание картинки игры — указатель. Но если игра под стиком (широкоэкранный
+     * режим на весь экран), кнопки лежат поверх неё и стик главнее. */
+    return !inside(T.g, x, y, 0) || inside(T.g, r.x + r.w / 2.0f, r.y + r.h / 2.0f, 0);
 }
 
 static float stick_radius(void)

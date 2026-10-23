@@ -74,6 +74,8 @@ void     platform_import_games(void);
 /* Экранная клавиатура для полей ввода в играх (на ПК не нужна — там своя клавиатура). */
 void     platform_text_input(int on);
 void     platform_vibrate(int ms);
+/* Следующие кадры проявляются из черноты за ms (запуск игры после анимации). */
+void     platform_fade_in(int ms);
 /* Открыть ссылку системным браузером (platformRequest); 0 — не получилось. */
 int      platform_open_url(const char *url);
 
