@@ -73,6 +73,10 @@ void     platform_touch_profile(const char *game_id);
 int      platform_touch_wide(void);
 /* «Залипание стрелок» для текущей игры: отпускание направления придерживается. */
 int      platform_latch(void);
+/* Размер экрана, выбранный для игры в меню паузы (ПК). 1 — выбран. */
+int      platform_game_size(const char *game_id, int *w, int *h);
+/* Язык системы для microedition.locale, например «ru-RU». */
+const char *platform_locale(void);
 /* Добавить игры системным выбором файлов (Android); по готовности придёт EV_REFRESH. */
 int      platform_can_import(void);
 void     platform_import_games(void);

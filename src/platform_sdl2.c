@@ -52,6 +52,9 @@ static int           ov_filter, ov_w, ov_h, ov_k;
 static char          pc_wide[MAX_WIDE][128];
 static char          pc_latch[MAX_WIDE][128]; /* игры с залипанием стрелок */
 static int           pc_nlatch;
+static char          pc_size[MAX_WIDE][128]; /* игры со своим размером экрана из меню */
+static short         pc_size_w[MAX_WIDE], pc_size_h[MAX_WIDE];
+static int           pc_nsize, size_dirty;
 static int           pc_nwide;
 static char          pc_game[128];  /* игра, что сейчас идёт (для широкого экрана) */
 static volatile int  menu_open;     /* меню паузы */
@@ -1006,7 +1009,14 @@ static void pc_load(void)
             pc_filter = atoi(line + 7);
         else if (!strncmp(line, "mute ", 5))
             pc_mute = atoi(line + 5) != 0;
-        else if (!strncmp(line, "latch ", 6) && pc_nlatch < MAX_WIDE)
+        else if (!strncmp(line, "size ", 5) && pc_nsize < MAX_WIDE) {
+            int w, h, n = 0;
+            if (sscanf(line + 5, "%dx%d %n", &w, &h, &n) == 2 && n > 0 && w >= 96 && h >= 64 && w <= 640 && h <= 640) {
+                snprintf(pc_size[pc_nsize], sizeof(pc_size[0]), "%.127s", line + 5 + n);
+                pc_size_w[pc_nsize] = (short)w;
+                pc_size_h[pc_nsize++] = (short)h;
+            }
+        } else if (!strncmp(line, "latch ", 6) && pc_nlatch < MAX_WIDE)
             snprintf(pc_latch[pc_nlatch++], sizeof(pc_latch[0]), "%.127s", line + 6);
         else if (!strncmp(line, "wide ", 5) && pc_nwide < MAX_WIDE)
             snprintf(pc_wide[pc_nwide++], sizeof(pc_wide[0]), "%.127s", line + 5);
@@ -1033,7 +1043,57 @@ static void pc_save(void)
         fprintf(f, "wide %s\n", pc_wide[i]);
     for (i = 0; i < pc_nlatch; i++)
         fprintf(f, "latch %s\n", pc_latch[i]);
+    for (i = 0; i < pc_nsize; i++)
+        fprintf(f, "size %dx%d %s\n", pc_size_w[i], pc_size_h[i], pc_size[i]);
     fclose(f);
+}
+
+static int pc_size_index(const char *id)
+{
+    int i;
+
+    for (i = 0; i < pc_nsize; i++)
+        if (!strcmp(pc_size[i], id))
+            return i;
+    return -1;
+}
+
+int platform_game_size(const char *id, int *w, int *h)
+{
+    int i;
+
+    if (!pc_loaded)
+        pc_load();
+    if (touch_on || !id || (i = pc_size_index(id)) < 0)
+        return 0;
+    *w = pc_size_w[i];
+    *h = pc_size_h[i];
+    return 1;
+}
+
+/* Язык системы для microedition.locale: «ru-RU», «en-US»… BT_LOCALE — подменить. */
+const char *platform_locale(void)
+{
+    static char loc[16];
+    const char *env = getenv("BT_LOCALE");
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+    SDL_Locale *l;
+#endif
+
+    if (env && *env)
+        return env;
+    if (loc[0])
+        return loc;
+    snprintf(loc, sizeof(loc), "en-US");
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+    if ((l = SDL_GetPreferredLocales()) != NULL) {
+        if (l[0].language && strlen(l[0].language) == 2)
+            snprintf(loc, sizeof(loc), "%s%s%s", l[0].language, l[0].country ? "-" : "",
+                     l[0].country ? l[0].country : "");
+        SDL_free(l);
+    }
+#endif
+    return loc;
 }
 
 static int pc_latch_index(const char *id)
@@ -1072,7 +1132,7 @@ static void set_fullscreen(int on)
 }
 
 /* Пункты меню. */
-enum { MI_RESUME, MI_FULL, MI_SCALE, MI_FILTER, MI_WIDE, MI_LATCH, MI_SOUND, MI_HINTS, MI_SHOT, MI_EXIT, MI_COUNT };
+enum { MI_RESUME, MI_FULL, MI_SCALE, MI_FILTER, MI_SIZE, MI_WIDE, MI_LATCH, MI_SOUND, MI_HINTS, MI_SHOT, MI_EXIT, MI_COUNT };
 
 #define MENU_W     236
 #define MENU_ROW   18
@@ -1096,6 +1156,14 @@ static void menu_label(int i, char *out, size_t cap)
     case MI_FULL:   snprintf(out, cap, "Экран: %s", pc_full ? "полный" : "окно"); break;
     case MI_SCALE:  snprintf(out, cap, "Масштаб: %s", scales[sc < 0 || sc > 3 ? 2 : sc]); break;
     case MI_FILTER: snprintf(out, cap, "Фильтр: %s", filters[pc_filter]); break;
+    case MI_SIZE: {
+        int k = pc_size_index(pc_game);
+        if (k < 0)
+            snprintf(out, cap, "Экран игры: авто");
+        else
+            snprintf(out, cap, "Экран игры: %d×%d", pc_size_w[k], pc_size_h[k]);
+        break;
+    }
     case MI_WIDE:   snprintf(out, cap, "Широкий экран: %s", pc_wide_index(pc_game) >= 0 ? "да" : "нет"); break;
     case MI_LATCH:  snprintf(out, cap, "Залипание стрелок: %s", pc_latch_index(pc_game) >= 0 ? "да" : "нет"); break;
     case MI_SOUND:  snprintf(out, cap, "Звук: %s", pc_mute ? "выкл" : "вкл"); break;
@@ -1125,6 +1193,9 @@ static void menu_close(void)
         return;
     menu_open = 0;
     show_mouse(0);
+    if (size_dirty && pc_game[0])
+        push(EV_RESTART, 0);    /* размер экрана игры меняется только с перезапуском */
+    size_dirty = 0;
     if (tex)
         render();
 }
@@ -1223,6 +1294,32 @@ static void menu_activate(int dir)
         apply_scale();
         break;
     }
+    case MI_SIZE: {
+        /* размеры экранов кнопочных телефонов; «авто» — какой нашёлся в игре */
+        static const short sizes[][2] = { { 0, 0 }, { 128, 160 }, { 176, 208 }, { 176, 220 }, { 240, 320 },
+                                          { 240, 400 }, { 320, 240 }, { 360, 640 }, { 480, 640 } };
+        int n = (int)(sizeof(sizes) / sizeof(sizes[0])), k = pc_size_index(pc_game), cur = 0, i;
+        if (!pc_game[0])
+            break;
+        for (i = 1; k >= 0 && i < n; i++)
+            if (sizes[i][0] == pc_size_w[k] && sizes[i][1] == pc_size_h[k])
+                cur = i;
+        cur = (cur + (dir < 0 ? n - 1 : 1)) % n;
+        if (k >= 0) {
+            memmove(&pc_size[k], &pc_size[k + 1], (size_t)(pc_nsize - k - 1) * sizeof(pc_size[0]));
+            memmove(&pc_size_w[k], &pc_size_w[k + 1], (size_t)(pc_nsize - k - 1) * sizeof(pc_size_w[0]));
+            memmove(&pc_size_h[k], &pc_size_h[k + 1], (size_t)(pc_nsize - k - 1) * sizeof(pc_size_h[0]));
+            pc_nsize--;
+        }
+        if (cur && pc_nsize < MAX_WIDE) {
+            snprintf(pc_size[pc_nsize], sizeof(pc_size[0]), "%s", pc_game);
+            pc_size_w[pc_nsize] = sizes[cur][0];
+            pc_size_h[pc_nsize++] = sizes[cur][1];
+        }
+        pc_save();
+        size_dirty = 1;         /* игра перезапустится, когда закроют меню */
+        break;
+    }
     case MI_FILTER:
         pc_filter = (pc_filter + (dir < 0 ? FL_COUNT - 1 : 1)) % FL_COUNT;
         pc_save();
@@ -1277,7 +1374,7 @@ static void menu_activate(int dir)
 /* Пункт меняется стрелками влево-вправо. */
 static int menu_toggle(int i)
 {
-    return i == MI_SCALE || i == MI_FILTER || i == MI_FULL || i == MI_SOUND || i == MI_LATCH || i == MI_HINTS;
+    return i == MI_SCALE || i == MI_FILTER || i == MI_SIZE || i == MI_FULL || i == MI_SOUND || i == MI_LATCH || i == MI_HINTS;
 }
 
 static void menu_move(int d)

@@ -43,6 +43,9 @@ public final class Native {
     /* открыть ссылку системой (браузер); false — некуда */
     public static native boolean openUrl(String url);
 
+    /* язык системы, например «ru-RU» */
+    public static native String locale();
+
     /* звук: дескриптор (0 — не вышло); kind 0 — по содержимому, 1 — рингтон Nokia OTT */
     public static native int sndCreate(byte[] data, int kind);
 

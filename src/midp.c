@@ -5,6 +5,8 @@
 #include "audio.h"
 #include "gfx.h"
 #include "jvm.h"
+#include "classfile.h"
+#include "jar.h"
 #include "manifest.h"
 #include "png.h"
 #include "rt.h"
@@ -1056,6 +1058,14 @@ static int n_openUrl(Thread *t, Value *a, Value *r)
     return NATIVE_OK;
 }
 
+/* Язык системы: игры с несколькими языками сами выберут русский. */
+static int n_locale(Thread *t, Value *a, Value *r)
+{
+    (void)a;
+    r->l = jvm_new_string(t, platform_locale());
+    return NATIVE_OK;
+}
+
 static const NativeDef midp_natives[] = {
     { "javax/microedition/lcdui/Graphics", "fill0", NULL, g_fill0 },
     { "javax/microedition/lcdui/Graphics", "line0", NULL, g_line0 },
@@ -1074,6 +1084,7 @@ static const NativeDef midp_natives[] = {
     { "btvm/Native", "waitEvent", NULL, n_waitEvent },
     { "btvm/Native", "wake", NULL, n_wake },
     { "btvm/Native", "flush", NULL, n_flush },
+    { "btvm/Native", "locale", NULL, n_locale },
     { "btvm/Native", "screenWidth", NULL, n_screenWidth },
     { "btvm/Native", "screenHeight", NULL, n_screenHeight },
     { "btvm/Native", "exit", NULL, n_exit },
@@ -1104,7 +1115,7 @@ static const NativeDef midp_natives[] = {
 /* ---------- запуск ---------- */
 
 /* Размер экрана из манифеста: «Nokia-MIDlet-Original-Display-Size: 176,208» и похожие. */
-static void screen_size_from_manifest(void)
+static int screen_size_from_manifest(void)
 {
     static const char *keys[] = { "Nokia-MIDlet-Original-Display-Size", "MIDlet-Screen-Size", "Display-Size" };
     size_t i;
@@ -1117,9 +1128,75 @@ static void screen_size_from_manifest(void)
         if (v && sscanf(v, "%d%*[ ,xX*]%d", &w, &h) == 2 && w >= 96 && h >= 64 && w <= 640 && h <= 640) {
             M.w = w;
             M.h = h;
-            return;
+            return 1;
         }
     }
+    return 0;
+}
+
+/* Метод «()I», который просто возвращает число (bipush/sipush/ldc + ireturn), — его значение. */
+static int const_int_method(const ClassFile *cf, const char *name, int *out)
+{
+    int i;
+
+    for (i = 0; i < cf->method_count; i++) {
+        const Member *m = &cf->methods[i];
+        char n[32], d[8];
+        const uint8_t *c = m->code;
+        if (!c || classfile_utf8(cf, m->name_idx, n, sizeof(n)) || strcmp(n, name) ||
+            classfile_utf8(cf, m->desc_idx, d, sizeof(d)) || strcmp(d, "()I"))
+            continue;
+        if (m->code_len == 3 && c[0] == 0x10 && c[2] == 0xAC)
+            *out = (int8_t)c[1];
+        else if (m->code_len == 4 && c[0] == 0x11 && c[3] == 0xAC)
+            *out = (int16_t)(c[1] << 8 | c[2]);
+        else if (m->code_len == 3 && c[0] == 0x12 && c[2] == 0xAC && c[1] < cf->cp_count && cf->cp[c[1]].tag == CP_INTEGER)
+            *out = cf->cp[c[1]].u.i;
+        else
+            return 0;
+        return 1;
+    }
+    return 0;
+}
+
+/* Игра, собранная под один телефон, часто зашивает размер экрана прямо в свой Canvas:
+ * getWidth() { return 240; } getHeight() { return 400; } (The Sims 3 от EA и др.).
+ * Тогда отдаём ей ровно такой экран, иначе низ или край окажутся за кадром. */
+static int screen_size_from_classes(void)
+{
+    const Jar *jar = jvm_app_jar();
+    size_t i;
+    int found = 0;
+
+    for (i = 0; jar && i < jar->count && !found; i++) {
+        const char *name = jar->entries[i].name;
+        size_t nl = strlen(name), len, k;
+        uint8_t *buf;
+        ClassFile cf;
+        char err[64], super[64];
+        int w, h;
+
+        if (nl < 7 || strcmp(name + nl - 6, ".class") || jar->entries[i].usize > (1u << 20))
+            continue;
+        if (!(buf = jar_read(jar, &jar->entries[i], &len)))
+            continue;
+        for (k = 0; k + 9 <= len && memcmp(buf + k, "getHeight", 9); k++)
+            ;
+        if (k + 9 <= len && classfile_parse(&cf, buf, len, err, sizeof(err)) == 0) {
+            if (cf.super_class && classfile_class_name(&cf, cf.super_class, super, sizeof(super)) == 0 &&
+                (!strcmp(super, "javax/microedition/lcdui/Canvas") ||
+                 !strcmp(super, "javax/microedition/lcdui/game/GameCanvas")) &&
+                const_int_method(&cf, "getWidth", &w) && const_int_method(&cf, "getHeight", &h) &&
+                w >= 96 && h >= 64 && w <= 640 && h <= 640) {
+                M.w = w;
+                M.h = h;
+                found = 1;
+            }
+            classfile_free(&cf);
+        }
+        free(buf);
+    }
+    return found;
 }
 
 /* Широкоэкранный режим: экран игры под форму телефона, короткая сторона — как у игры.
@@ -1374,7 +1451,15 @@ MidpResult midp_run(const char *jar, const char *save_id, ScaleMode scale, char 
             fclose(jf);
         }
     }
-    screen_size_from_manifest();
+    if (!screen_size_from_manifest())
+        screen_size_from_classes();
+    {
+        int ow, oh;
+        if (platform_game_size(save_id, &ow, &oh)) {      /* размер, выбранный в меню паузы */
+            M.w = ow;
+            M.h = oh;
+        }
+    }
     rms_dir_for(save_id);
     shots_dir_for(save_id);
     {

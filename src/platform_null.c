@@ -3,6 +3,7 @@
 #include "platform.h"
 #include "util.h"
 
+#include <stdlib.h>
 #include <time.h>
 
 static Image screen;
@@ -82,3 +83,9 @@ void platform_set_fullscreen(int on) { (void)on; }
 void platform_stick(float *x, float *y) { *x = *y = 0; }
 int platform_open_url(const char *url) { (void)url; return 0; }
 int platform_touch_wide(void) { return 0; }
+int platform_game_size(const char *id, int *w, int *h) { (void)id; (void)w; (void)h; return 0; }
+const char *platform_locale(void)
+{
+    const char *env = getenv("BT_LOCALE");
+    return env && *env ? env : "en-US";
+}
