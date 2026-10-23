@@ -35,6 +35,7 @@ endif
 SRC := src/main.c src/jar.c src/manifest.c src/classfile.c src/png.c src/gfx.c \
        src/library.c src/launcher.c src/platform_$(BACKEND).c \
        src/jvm_core.c src/jvm_interp.c src/jvm_lib.c src/rt.c src/midp.c src/audio.c src/compat.c \
+       src/nes.c src/nes_map.c src/nes_run.c \
        $(if $(filter sdl2,$(BACKEND)),src/touch.c src/multitap.c src/update.c)
 OBJ := $(SRC:.c=.o)
 

@@ -13,7 +13,9 @@
 enum {
     KEY_NUM0 = 48, KEY_NUM9 = 57, KEY_STAR = 42, KEY_POUND = 35,
     KEY_UP = -1, KEY_DOWN = -2, KEY_LEFT = -3, KEY_RIGHT = -4, KEY_FIRE = -5,
-    KEY_SOFT_LEFT = -6, KEY_SOFT_RIGHT = -7, KEY_CLEAR = -8
+    KEY_SOFT_LEFT = -6, KEY_SOFT_RIGHT = -7, KEY_CLEAR = -8,
+    /* кнопки приставки (только в режиме картриджа, platform_console_mode) */
+    KEY_GAME_A = -20, KEY_GAME_B = -21, KEY_GAME_START = -22, KEY_GAME_SELECT = -23
 };
 
 typedef enum {
@@ -26,7 +28,9 @@ typedef enum {
     EV_RESTART,     /* перезапустить игру (сменили размер экрана в настройках кнопок) */
     EV_SCREENSHOT,  /* снимок экрана игры (F12 или кнопка с фотоаппаратом) */
     EV_HOVER,       /* мышь сдвинулась без нажатия (только в режиме курсора) */
-    EV_DROP         /* на окно перетащили файл, name — его путь (UTF-8) */
+    EV_DROP,        /* на окно перетащили файл, name — его путь (UTF-8) */
+    EV_STATE_SAVE,  /* меню паузы: быстрое сохранение (картридж NES) */
+    EV_STATE_LOAD   /* меню паузы: загрузить быстрое сохранение */
 } EventType;
 
 typedef struct {
@@ -75,6 +79,8 @@ int      platform_touch_wide(void);
 int      platform_latch(void);
 /* Размер экрана, выбранный для игры в меню паузы (ПК). 1 — выбран. */
 int      platform_game_size(const char *game_id, int *w, int *h);
+/* Идёт картридж NES: кнопки приставки (KEY_GAME_*), в меню паузы — сохранение и сброс. */
+void     platform_console_mode(int on);
 /* Язык системы для microedition.locale, например «ru-RU». */
 const char *platform_locale(void);
 /* Добавить игры системным выбором файлов (Android); по готовности придёт EV_REFRESH. */

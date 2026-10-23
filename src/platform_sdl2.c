@@ -66,6 +66,7 @@ static uint32_t      typing_t;
 static int           osk_open;
 static int           osk_mouse;     /* кнопку мыши нажали на экранной клавиатуре — отпускание тоже её */
 static int           pads;          /* подключено геймпадов — подсказки рисуем под них */
+static int           console;       /* идёт картридж NES: своя раскладка и меню */
 static void toast_draw(void);
 static int  typing_key(const SDL_Event *e);
 static int  osk_event(const SDL_Event *e);
@@ -462,6 +463,11 @@ void platform_cursor_mode(int on)
     show_mouse(0);      /* в лаунчере рука рисуется сама; в игре появится, когда тронут мышь */
 }
 
+void platform_console_mode(int on)
+{
+    console = on;
+}
+
 void platform_stick(float *x, float *y)
 {
     *x = pad_ax;
@@ -636,8 +642,26 @@ void platform_vibrate(int ms)
 
 /* Раскладка: стрелки/WASD — джойстик, Enter/пробел — огонь, цифры и numpad — как на телефоне,
  * F1/F2 (или Q/E) — софт-клавиши. */
+/* Раскладка приставки: X/J/пробел — A, Z/K — B, Enter — Start, Shift/Tab/Backspace — Select. */
+static int console_key(SDL_Keycode k)
+{
+    switch (k) {
+    case SDLK_UP:    case SDLK_w: return KEY_UP;
+    case SDLK_DOWN:  case SDLK_s: return KEY_DOWN;
+    case SDLK_LEFT:  case SDLK_a: return KEY_LEFT;
+    case SDLK_RIGHT: case SDLK_d: return KEY_RIGHT;
+    case SDLK_x: case SDLK_j: case SDLK_SPACE: case SDLK_l: return KEY_GAME_A;
+    case SDLK_z: case SDLK_k: case SDLK_y: return KEY_GAME_B;
+    case SDLK_RETURN: case SDLK_KP_ENTER: return KEY_GAME_START;
+    case SDLK_RSHIFT: case SDLK_LSHIFT: case SDLK_TAB: case SDLK_BACKSPACE: return KEY_GAME_SELECT;
+    default: return 0;
+    }
+}
+
 static int map_key(SDL_Keycode k)
 {
+    if (console)
+        return console_key(k);
     switch (k) {
     case SDLK_UP:    case SDLK_w: return KEY_UP;
     case SDLK_DOWN:  case SDLK_s: return KEY_DOWN;
@@ -664,6 +688,14 @@ static int map_key(SDL_Keycode k)
  * кнопка Xbox — выход в меню. */
 static int map_button(Uint8 b)
 {
+    if (console)        /* у NES кнопки подписаны так же: A, B, Start, Select */
+        switch (b) {
+        case SDL_CONTROLLER_BUTTON_A: case SDL_CONTROLLER_BUTTON_Y: return KEY_GAME_A;
+        case SDL_CONTROLLER_BUTTON_B: case SDL_CONTROLLER_BUTTON_X: return KEY_GAME_B;
+        case SDL_CONTROLLER_BUTTON_START: return KEY_GAME_START;
+        case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return KEY_GAME_SELECT;
+        default: break;
+        }
     switch (b) {
     case SDL_CONTROLLER_BUTTON_DPAD_UP:       return KEY_UP;
     case SDL_CONTROLLER_BUTTON_DPAD_DOWN:     return KEY_DOWN;
@@ -716,9 +748,9 @@ static void translate(const SDL_Event *e)
     }
     if (menu_open && menu_event(e))
         return;                         /* меню паузы забирает ввод себе */
-    if (!touch_on && !cursor_mode && (osk_open || osk_mouse) && osk_event(e))
+    if (!touch_on && !cursor_mode && !console && (osk_open || osk_mouse) && osk_event(e))
         return;                         /* экранная клавиатура геймпада */
-    if (!touch_on && !cursor_mode && typing_key(e))
+    if (!touch_on && !cursor_mode && !console && typing_key(e))
         return;                         /* режим букв */
     if (!touch_on && !cursor_mode) {    /* в игре рука видна, только пока мышью пользуются */
         if (e->type == SDL_MOUSEMOTION || e->type == SDL_MOUSEBUTTONDOWN) {
@@ -809,7 +841,7 @@ static void translate(const SDL_Event *e)
     case SDL_CONTROLLERBUTTONDOWN:
     case SDL_CONTROLLERBUTTONUP:
         if ((e->cbutton.button == SDL_CONTROLLER_BUTTON_LEFTSTICK ||
-             e->cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSTICK) && !touch_on && !cursor_mode) {
+             e->cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSTICK) && !touch_on && !cursor_mode && !console) {
             if (e->type == SDL_CONTROLLERBUTTONDOWN) {
                 osk_open = 1;           /* нажатие на стик — экранная клавиатура */
                 if (tex)
@@ -1132,7 +1164,7 @@ static void set_fullscreen(int on)
 }
 
 /* Пункты меню. */
-enum { MI_RESUME, MI_FULL, MI_SCALE, MI_FILTER, MI_SIZE, MI_WIDE, MI_LATCH, MI_SOUND, MI_HINTS, MI_SHOT, MI_EXIT, MI_COUNT };
+enum { MI_RESUME, MI_SAVE, MI_LOAD, MI_RESET, MI_FULL, MI_SCALE, MI_FILTER, MI_SIZE, MI_WIDE, MI_LATCH, MI_SOUND, MI_HINTS, MI_SHOT, MI_EXIT, MI_COUNT };
 
 #define MENU_W     236
 #define MENU_ROW   18
@@ -1140,6 +1172,8 @@ enum { MI_RESUME, MI_FULL, MI_SCALE, MI_FILTER, MI_SIZE, MI_WIDE, MI_LATCH, MI_S
 #define MENU_H     (MENU_TOP + MI_COUNT * MENU_ROW + 24)
 
 static int          menu_sel, menu_k, menu_stick;
+static int          menu_vis[MI_COUNT], menu_n;    /* видимые пункты: у NES свои, у J2ME свои */
+#define MENU_HN     (MENU_TOP + menu_n * MENU_ROW + 24)
 static Image        menu_img;
 static SDL_Texture *menu_tex;
 static SDL_Rect     menu_dst;
@@ -1153,6 +1187,9 @@ static void menu_label(int i, char *out, size_t cap)
 
     switch (i) {
     case MI_RESUME: snprintf(out, cap, "Продолжить"); break;
+    case MI_SAVE:   snprintf(out, cap, "Сохранить игру"); break;
+    case MI_LOAD:   snprintf(out, cap, "Загрузить игру"); break;
+    case MI_RESET:  snprintf(out, cap, "Сброс (Reset)"); break;
     case MI_FULL:   snprintf(out, cap, "Экран: %s", pc_full ? "полный" : "окно"); break;
     case MI_SCALE:  snprintf(out, cap, "Масштаб: %s", scales[sc < 0 || sc > 3 ? 2 : sc]); break;
     case MI_FILTER: snprintf(out, cap, "Фильтр: %s", filters[pc_filter]); break;
@@ -1173,12 +1210,26 @@ static void menu_label(int i, char *out, size_t cap)
     }
 }
 
+static void menu_build(void)
+{
+    int i;
+
+    menu_n = 0;
+    for (i = 0; i < MI_COUNT; i++) {
+        int nes_only = i == MI_SAVE || i == MI_LOAD || i == MI_RESET;
+        int j2me_only = i == MI_SIZE || i == MI_WIDE || i == MI_LATCH;
+        if (console ? !j2me_only : !nes_only)
+            menu_vis[menu_n++] = i;
+    }
+}
+
 static void menu_show(void)
 {
     if (menu_open)
         return;
     menu_open = 1;
-    menu_sel = MI_RESUME;
+    menu_build();
+    menu_sel = 0;
     menu_dirty = 1;
     show_mouse(1);
     if (hand_cursor)
@@ -1220,13 +1271,14 @@ static void menu_draw(void)
         Image *m = &menu_img;
         char s[64];
         menu_dirty = 0;
-        gfx_fill(m, 0, 0, MENU_W, MENU_H, 0xF21A1724u);
-        gfx_frame(m, 0, 0, MENU_W, MENU_H, 0xFF3A3450u);
+        gfx_fill(m, 0, 0, MENU_W, MENU_H, 0);
+        gfx_fill(m, 0, 0, MENU_W, MENU_HN, 0xF21A1724u);
+        gfx_frame(m, 0, 0, MENU_W, MENU_HN, 0xFF3A3450u);
         gfx_text(m, &font_big, (MENU_W - gfx_text_width(&font_big, "Пауза", 1)) / 2, 7, "Пауза", 0xFFEDE8F2u, 1);
         gfx_fill(m, 10, MENU_TOP - 4, MENU_W - 20, 1, 0xFF3A3450u);
-        for (i = 0; i < MI_COUNT; i++) {
+        for (i = 0; i < menu_n; i++) {
             int y = MENU_TOP + i * MENU_ROW;
-            menu_label(i, s, sizeof(s));
+            menu_label(menu_vis[i], s, sizeof(s));
             if (i == menu_sel)
                 gfx_fill(m, 6, y, MENU_W - 12, MENU_ROW - 2, 0xFF2E2944u);
             if (i == menu_sel)
@@ -1237,22 +1289,25 @@ static void menu_draw(void)
             const char *lg = pads ? "A\tвыбрать\tB\tназад\tView\tзакрыть"
                                   : "[Enter]\tок\t[<][>]\tменять\t[Esc]\tзакрыть";
             int lw = gfx_hints(NULL, &font_small, 0, 0, lg, 0);
-            gfx_hints(m, &font_small, (MENU_W - lw) / 2, MENU_H - font_small.h - 7, lg, 0xFF8F8899u);
+            gfx_hints(m, &font_small, (MENU_W - lw) / 2, MENU_HN - font_small.h - 7, lg, 0xFF8F8899u);
         }
         SDL_UpdateTexture(menu_tex, NULL, menu_img.px, MENU_W * 4);
     }
     platform_display_size(&dw, &dh);
-    menu_k = dw * 7 / 10 / MENU_W < dh * 8 / 10 / MENU_H ? dw * 7 / 10 / MENU_W : dh * 8 / 10 / MENU_H;
+    menu_k = dw * 7 / 10 / MENU_W < dh * 8 / 10 / MENU_HN ? dw * 7 / 10 / MENU_W : dh * 8 / 10 / MENU_HN;
     if (menu_k < 1)
         menu_k = 1;
     menu_dst.w = MENU_W * menu_k;
-    menu_dst.h = MENU_H * menu_k;
+    menu_dst.h = MENU_HN * menu_k;
     menu_dst.x = (dw - menu_dst.w) / 2;
     menu_dst.y = (dh - menu_dst.h) / 2;
     SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
     SDL_SetRenderDrawColor(ren, 0, 0, 0, 150);  /* игра темнеет под меню */
     SDL_RenderFillRect(ren, NULL);
-    SDL_RenderCopy(ren, menu_tex, NULL, &menu_dst);
+    {
+        SDL_Rect src = { 0, 0, MENU_W, MENU_HN };
+        SDL_RenderCopy(ren, menu_tex, &src, &menu_dst);
+    }
 }
 
 /* Строка меню под мышью или -1. */
@@ -1269,16 +1324,20 @@ static int menu_hit(int wx, int wy)
     if (menu_k < 1 || wx < menu_dst.x || wx >= menu_dst.x + menu_dst.w)
         return -1;
     row = ((wy - menu_dst.y) / menu_k - MENU_TOP);
-    if (row < 0 || row / MENU_ROW >= MI_COUNT)
+    if (row < 0 || row / MENU_ROW >= menu_n)
         return -1;
     return row / MENU_ROW;
 }
 
 static void menu_activate(int dir)
 {
-    switch (menu_sel) {
+    switch (menu_vis[menu_sel]) {
     case MI_RESUME:
         menu_close();
+        return;
+    case MI_SAVE: case MI_LOAD: case MI_RESET:
+        menu_close();
+        push(menu_vis[menu_sel] == MI_SAVE ? EV_STATE_SAVE : menu_vis[menu_sel] == MI_LOAD ? EV_STATE_LOAD : EV_RESTART, 0);
         return;
     case MI_FULL:
         set_fullscreen(!pc_full);
@@ -1379,7 +1438,7 @@ static int menu_toggle(int i)
 
 static void menu_move(int d)
 {
-    menu_sel = (menu_sel + d + MI_COUNT) % MI_COUNT;
+    menu_sel = (menu_sel + d + menu_n) % menu_n;
     menu_dirty = 1;
     render();
 }
@@ -1399,11 +1458,11 @@ static int menu_event(const SDL_Event *e)
         case SDLK_UP: case SDLK_w: menu_move(-1); return 1;
         case SDLK_DOWN: case SDLK_s: menu_move(1); return 1;
         case SDLK_LEFT: case SDLK_a:
-            if (menu_toggle(menu_sel))
+            if (menu_toggle(menu_vis[menu_sel]))
                 menu_activate(-1);
             return 1;
         case SDLK_RIGHT: case SDLK_d:
-            if (menu_toggle(menu_sel))
+            if (menu_toggle(menu_vis[menu_sel]))
                 menu_activate(1);
             return 1;
         case SDLK_RETURN: case SDLK_SPACE: case SDLK_KP_ENTER:
@@ -1881,13 +1940,19 @@ int platform_hints(void)
  * полосой внизу. LB+RB или меню паузы их прячут. */
 static void toast_draw(void)
 {
-    static const char *const pairs[] = { "View\tменю", "A\tогонь (5)", "Start\tлевая софт", "B\tправая софт",
-                                         "L3\tклавиатура", "LB+RB\tскрыть" };
-    enum { N = sizeof(pairs) / sizeof(pairs[0]) };
-    static Image col, row;
-    static SDL_Texture *tcol, *trow;
-    static int cw, ch, rw, rh;
-    int dw, dh, k, i, side;
+    static const char *const j2me[] = { "View\tменю", "A\tогонь (5)", "Start\tлевая софт", "B\tправая софт",
+                                        "L3\tклавиатура", "LB+RB\tскрыть" };
+    static const char *const nes[] = { "View\tменю", "A/Y\tA", "B/X\tB", "Start\tStart", "LB\tSelect",
+                                       "LB+RB\tскрыть" };
+    enum { N = sizeof(j2me) / sizeof(j2me[0]) };
+    static Image cols[2], rows[2];
+    static SDL_Texture *tcols[2], *trows[2];
+    static int cws[2], chs[2], rws[2], rhs[2];
+    const char *const *pairs = console ? nes : j2me;
+    int m = console != 0, dw, dh, k, i, side;
+    Image col = cols[m], row = rows[m];
+    SDL_Texture *tcol = tcols[m], *trow = trows[m];
+    int cw = cws[m], ch = chs[m], rw = rws[m], rh = rhs[m];
     SDL_Rect d;
 
     if (!tcol) {
@@ -1920,6 +1985,14 @@ static void toast_draw(void)
         SDL_SetTextureBlendMode(trow, SDL_BLENDMODE_BLEND);
         SDL_UpdateTexture(tcol, NULL, col.px, cw * 4);
         SDL_UpdateTexture(trow, NULL, row.px, rw * 4);
+        cols[m] = col;
+        rows[m] = row;
+        tcols[m] = tcol;
+        trows[m] = trow;
+        cws[m] = cw;
+        chs[m] = ch;
+        rws[m] = rw;
+        rhs[m] = rh;
     }
     platform_display_size(&dw, &dh);
     side = dw - (game_dst.x + game_dst.w);       /* свободное поле справа от игры */

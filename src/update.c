@@ -33,7 +33,7 @@
 
 static SDL_atomic_t st, prog;
 static int  started, restart;
-static char ver[32], url[600], asset[64];
+static char ver[48], url[600], asset[64];
 static long size;
 static char path_new[1100];     /* куда качаем (UTF-8) */
 #if !defined(_WIN32) && !defined(__ANDROID__)

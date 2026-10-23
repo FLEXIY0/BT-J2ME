@@ -85,6 +85,28 @@ static void read_game(Game *g)
     jar_close(&jar);
 }
 
+/* Картридж NES: название — из имени файла без пометок дампа «(U) [!]», подзаголовок — NES. */
+static void read_nes(Game *g)
+{
+    char *p, *o;
+    FILE *f;
+
+    snprintf(g->name, sizeof(g->name), "%.127s", g->base);
+    for (p = g->name; *p; p++)
+        if (*p == '_')
+            *p = ' ';
+    if ((p = strpbrk(g->name, "([")) != NULL && p > g->name)
+        *p = '\0';
+    for (o = g->name + strlen(g->name); o > g->name && o[-1] == ' '; o--)
+        o[-1] = '\0';
+    copy_str(g->profile, sizeof(g->profile), "NES");
+    if ((f = bt_fopen(g->path, "rb")) != NULL) {
+        if (fseek(f, 0, SEEK_END) == 0)
+            g->size = ftell(f);
+        fclose(f);
+    }
+}
+
 static int by_name(const void *a, const void *b)
 {
     return strcasecmp(((const Game *)a)->name, ((const Game *)b)->name);
@@ -102,9 +124,10 @@ int library_scan(Library *lib, const char *dir)
         return -1;
     while ((name = bt_dir_next(d)) != NULL) {
         size_t n = strlen(name);
+        int nes = n >= 5 && strcasecmp(name + n - 4, ".nes") == 0;
         Game *g;
 
-        if (n < 5 || strcasecmp(name + n - 4, ".jar") != 0 || n - 4 >= sizeof(g->base))
+        if (n < 5 || (strcasecmp(name + n - 4, ".jar") != 0 && !nes) || n - 4 >= sizeof(g->base))
             continue;
         if (lib->count == cap) {
             Game *ng = realloc(lib->games, (size_t)(cap = cap ? cap * 2 : 16) * sizeof(Game));
@@ -117,7 +140,11 @@ int library_scan(Library *lib, const char *dir)
         snprintf(g->path, sizeof(g->path), "%s/%s", dir, name);
         memcpy(g->base, name, n - 4);
         g->base[n - 4] = '\0';
-        read_game(g);
+        g->kind = nes ? GAME_NES : GAME_J2ME;
+        if (nes)
+            read_nes(g);
+        else
+            read_game(g);
     }
     bt_dir_close(d);
     if (lib->count)
@@ -166,6 +193,8 @@ static uint32_t hsv(unsigned h, unsigned s, unsigned v)   /* h 0..359, s/v 0..25
 
 /* Обложка без надписей: цветной фон по хэшу названия, полиграфическая штриховка,
  * «логотип-овал» сверху и крупная пиксельная иконка игры (или диск, если иконки нет). */
+static int imax(int a, int b) { return a > b ? a : b; }
+
 static Image make_cover(const Game *g, int w, int h)
 {
     Image c = image_new(w, h);
@@ -204,6 +233,16 @@ static Image make_cover(const Game *g, int w, int h)
         iy = band + (h - band - ih) / 2;
         gfx_fill(&c, ix + 2, iy + 3, iw, ih, 0x40000000u);
         gfx_blit_scaled(&c, &g->icon, ix, iy, iw, ih, 255);
+    } else if (g->kind == GAME_NES) {
+        /* картридж: серый корпус, цветная наклейка, рёбра снизу */
+        int cw = w * 3 / 5, ch = cw * 11 / 10, cx = (w - cw) / 2, cy = band + (h - band - ch) / 2, i;
+        gfx_fill(&c, cx + 3, cy + 4, cw, ch, 0x40000000u);
+        gfx_fill(&c, cx, cy, cw, ch, 0xFF8E8C96u);
+        gfx_fill(&c, cx, cy, cw, 2, 0xFFB4B2BCu);
+        gfx_fill(&c, cx + cw / 8, cy + ch / 8, cw * 3 / 4, ch / 2, hsv((hue + 180) % 360, 140, 220));
+        gfx_fill(&c, cx + cw / 8, cy + ch / 8, cw * 3 / 4, ch / 12, 0x50FFFFFFu);
+        for (i = 0; i < 5; i++)
+            gfx_fill(&c, cx + cw / 6 + i * (cw * 2 / 3) / 5, cy + ch * 3 / 4, imax(1, cw / 24), ch / 6, 0xFF6C6A74u);
     } else {
         gfx_disc(&c, w / 2, band + (h - band) / 2, w / 3, (float)(hs % 100) / 100.0f, 255);
     }

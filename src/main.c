@@ -10,6 +10,7 @@
 #include "jvm.h"
 #include "launcher.h"
 #include "midp.h"
+#include "nes.h"
 #include "rt.h"
 #include "manifest.h"
 #include "platform.h"
@@ -298,7 +299,8 @@ static int is_game_file(const char *path)
     FILE *f;
 
     if (n < 5 || path[n - 4] != '.' || (strcmp(path + n - 3, "jar") && strcmp(path + n - 3, "jad") &&
-                                         strcmp(path + n - 3, "JAR") && strcmp(path + n - 3, "JAD")))
+                                         strcmp(path + n - 3, "JAR") && strcmp(path + n - 3, "JAD") &&
+                                         strcmp(path + n - 3, "nes") && strcmp(path + n - 3, "NES")))
         return 0;
     if (!(f = bt_fopen(path, "rb")))
         return 0;
@@ -376,11 +378,14 @@ int main(int argc, char **argv)
             return 2;
         snprintf(base, sizeof(base), "%s", slash ? slash + 1 : argv[2]);
         n = strlen(base);
-        if (n > 4 && strcmp(base + n - 4, ".jar") == 0)
+        if (n > 4 && (strcmp(base + n - 4, ".jar") == 0 || strcmp(base + n - 4, ".nes") == 0))
             base[n - 4] = '\0';
         if (platform_init(&cfg))
             return 1;
-        r = midp_run(argv[2], base, cfg.scale, err, sizeof(err));
+        if (n > 4 && strcmp(argv[2] + strlen(argv[2]) - 4, ".nes") == 0)
+            r = nes_run(argv[2], base, cfg.scale, err, sizeof(err));
+        else
+            r = midp_run(argv[2], base, cfg.scale, err, sizeof(err));
         platform_shutdown();
         if (r == MIDP_ERROR) {
             BT_LOG("%s: %s\n", argv[2], err);

@@ -6,9 +6,12 @@
 
 #include "gfx.h"
 
+enum { GAME_J2ME, GAME_NES };
+
 typedef struct {
     char     path[1024];
-    char     base[256];     /* имя файла без .jar — по нему ищется обложка */
+    char     base[256];     /* имя файла без .jar/.nes — по нему ищется обложка */
+    int      kind;          /* GAME_J2ME или GAME_NES */
     char     name[128], vendor[128], version[32], profile[32];
     long     size;
     Image    icon;          /* иконка MIDlet из JAR, может быть пустой */
