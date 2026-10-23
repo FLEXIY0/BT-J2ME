@@ -266,6 +266,28 @@ static void drum_setup(Voice *v, int note)
     case 51: case 53: case 59:                          /* райд */
         v->filt = F_HIGH; v->lp_k = 100; dec = 400; amp = 0.35f;
         break;
+    case 54: case 69: case 70: case 82:                 /* бубен, кабаса, маракасы, шейкер */
+        v->filt = F_HIGH; v->lp_k = 40; dec = note == 54 ? 90 : 30; amp = 0.4f;
+        break;
+    case 56:                                            /* коровий колокольчик */
+        f0 = 800; f1 = 780; dec = 160; amp = 0.55f;
+        break;
+    case 60: case 61:                                   /* бонги: высокий и низкий */
+        f0 = note == 60 ? 420 : 330; f1 = f0 * 0.85f; dec = 110; amp = 0.9f; sweep_ms = 40;
+        break;
+    case 62: case 63: case 64:                          /* конги: глухая, открытая, низкая */
+        f0 = note == 62 ? 300 : note == 63 ? 260 : 200;
+        f1 = f0 * 0.8f; dec = note == 62 ? 70 : 170; amp = 1.0f; sweep_ms = 50;
+        break;
+    case 65: case 66:                                   /* тимбалы */
+        f0 = note == 65 ? 520 : 400; f1 = f0 * 0.75f; dec = 200; amp = 0.8f; sweep_ms = 60;
+        break;
+    case 67: case 68:                                   /* агого */
+        f0 = note == 67 ? 1050 : 800; f1 = f0; dec = 140; amp = 0.5f;
+        break;
+    case 75: case 76: case 77:                          /* клавесы, вуд-блоки */
+        f0 = note == 75 ? 2500 : note == 76 ? 1700 : 1300; f1 = f0; dec = 45; amp = 0.6f;
+        break;
     }
     v->drum = 1;
     v->amp *= amp;

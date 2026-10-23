@@ -36,6 +36,10 @@ public abstract class MIDlet {
     public final boolean platformRequest(String url) throws javax.microedition.io.ConnectionNotFoundException {
         if (url == null || url.length() == 0)
             return false;
+        if (url.startsWith("sms:") || url.startsWith("smsto:")) {   /* оплата SMS через телефон — считаем отправленной */
+            System.out.println("покупка: " + url + " — считаем оплаченной");
+            return false;
+        }
         if (!btvm.Native.openUrl(url))
             throw new javax.microedition.io.ConnectionNotFoundException(url);
         return false;

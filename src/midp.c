@@ -36,6 +36,7 @@ static struct {
     int       w, h;
     Manifest  mf, jad;
     int       have_mf, have_jad;
+    long      jar_size;     /* MIDlet-Jar-Size, если JAD нет */
     int       wide, ow, oh;     /* широкоэкранный режим: исходный размер игры */
     char      shots[1100];      /* папка скриншотов игры */
     uint32_t  t_start;
@@ -747,6 +748,11 @@ static int n_getAppProperty(Thread *t, Value *a, Value *r)
     v = M.have_jad ? manifest_get(&M.jad, key) : NULL;
     if (!v && M.have_mf)
         v = manifest_get(&M.mf, key);
+    if (!v && M.jar_size > 0 && !strcmp(key, "MIDlet-Jar-Size")) {
+        /* без JAD его нет, а игры с платными SMS без него считают себя «не настроенными» */
+        snprintf(key, sizeof(key), "%ld", M.jar_size);
+        v = key;
+    }
     r->l = v ? jvm_new_string(t, v) : NULL;
     return v && !r->l ? NATIVE_EXCEPTION : NATIVE_OK;
 }
@@ -1227,6 +1233,15 @@ MidpResult midp_run(const char *jar, const char *save_id, ScaleMode scale, char 
         goto out;
     }
     load_jad(jar);
+    {
+        FILE *jf = bt_fopen(jar, "rb");
+        M.jar_size = 0;
+        if (jf) {
+            if (fseek(jf, 0, SEEK_END) == 0)
+                M.jar_size = ftell(jf);
+            fclose(jf);
+        }
+    }
     screen_size_from_manifest();
     rms_dir_for(save_id);
     shots_dir_for(save_id);
@@ -1302,6 +1317,10 @@ MidpResult midp_run(const char *jar, const char *save_id, ScaleMode scale, char 
             default:
                 break;
             }
+        }
+        if (platform_paused()) {    /* меню паузы на ПК: машина стоит */
+            platform_sleep_ms(16);
+            continue;
         }
         deliver_releases();
         audio_pump();

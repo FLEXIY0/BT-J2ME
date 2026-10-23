@@ -6,7 +6,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 
-/* Сети нет: старые игры ходили на серверы, которых давно нет. Поддерживаем только resource:/ */
+/* Сети нет: старые игры ходили на серверы, которых давно нет. Поддерживаем resource:/ и
+ * sms:// — платные SMS «уходят» успешно (btvm.SmsConnection), чтобы покупки в играх работали. */
 public class Connector {
     public static final int READ = 1, WRITE = 2, READ_WRITE = 3;
 
@@ -24,6 +25,8 @@ public class Connector {
     public static Connection open(String name, int mode, boolean timeouts) throws IOException {
         if (name == null)
             throw new IllegalArgumentException();
+        if (name.startsWith("sms:") || name.startsWith("mms:"))     /* платные SMS — эмуляция оплаты */
+            return new btvm.SmsConnection(name);
         throw new ConnectionNotFoundException(name);
     }
 

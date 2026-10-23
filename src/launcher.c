@@ -733,7 +733,7 @@ static void draw_tabs(Ui *ui)
     /* значок подключённого геймпада — мигает при подключении */
     if (ui->pad_connected && (ui->pad_flash == 0 || (platform_ticks_ms() / 200) % 2 == 0 ||
                               platform_ticks_ms() > ui->pad_flash))
-        draw_icon(s, &icon_pad, ui->m, ui->m - 1, 1, ui->th->sub, 0);
+        draw_icon(s, &icon_pad, ui->m + icon_picture.w + 6, ui->m - 1, 1, ui->th->sub, 0);   /* правее значка обложки */
 }
 
 /* ---------- анимации запуска ---------- */
@@ -1679,6 +1679,97 @@ static void rescan(Ui *ui, const char *games_dir)
     ui->pos = (float)ui->sel;
 }
 
+/* ---------- добавление игр перетаскиванием ---------- */
+
+static char import_sel[1024];   /* только что добавленная игра — полка откроется на ней */
+
+static int ends_with(const char *s, const char *ext)
+{
+    size_t n = strlen(s), m = strlen(ext), i;
+
+    if (n < m)
+        return 0;
+    for (i = 0; i < m; i++)
+        if ((s[n - m + i] | 0x20) != ext[i])
+            return 0;
+    return 1;
+}
+
+static int copy_file(const char *src, const char *dst)
+{
+    FILE *in = bt_fopen(src, "rb"), *out;
+    char buf[65536];
+    size_t n;
+    int ok = 1;
+
+    if (!in)
+        return 0;
+    if (!strcmp(src, dst) || !(out = bt_fopen(dst, "wb"))) {
+        fclose(in);
+        return !strcmp(src, dst);
+    }
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
+        if (fwrite(buf, 1, n, out) != n)
+            ok = 0;
+    fclose(in);
+    if (fclose(out) != 0)
+        ok = 0;
+    return ok;
+}
+
+int launcher_import(const char *games_dir, const char *path)
+{
+    const char *name = path, *p;
+    char dst[1200], pair[1200], pair_dst[1200], stem[1024];
+    FILE *f;
+    int jar = ends_with(path, ".jar");
+
+    if (!jar && !ends_with(path, ".jad"))
+        return 0;
+    for (p = path; *p; p++)
+        if (*p == '/' || *p == '\\')
+            name = p + 1;
+    bt_mkdirs(games_dir);
+    snprintf(dst, sizeof(dst), "%s/%s", games_dir, name);
+    if (!copy_file(path, dst)) {
+        BT_LOG("не удалось добавить %s\n", path);
+        return 0;
+    }
+    /* у игры бывает пара: JAR с описанием JAD — переносим вместе */
+    snprintf(stem, sizeof(stem), "%.*s", (int)(strlen(path) - 4), path);
+    snprintf(pair, sizeof(pair), "%s%s", stem, jar ? ".jad" : ".jar");
+    if ((f = bt_fopen(pair, "rb")) != NULL) {
+        fclose(f);
+        snprintf(pair_dst, sizeof(pair_dst), "%.*s%s", (int)(strlen(dst) - 4), dst, jar ? ".jad" : ".jar");
+        copy_file(pair, pair_dst);
+    }
+    snprintf(import_sel, sizeof(import_sel), "%.*s.jar", (int)(strlen(dst) - 4), dst);
+    BT_LOG("добавлена игра: %s\n", dst);
+    return 1;
+}
+
+/* После пересканирования полки встать на добавленную игру. */
+static void select_imported(Ui *ui)
+{
+    const char *want = strrchr(import_sel, '/');
+    int i;
+
+    if (!import_sel[0])
+        return;
+    want = want ? want + 1 : import_sel;
+    for (i = 0; i < ui->lib.count; i++) {
+        const char *b = strrchr(ui->lib.games[i].path, '/');
+        b = b ? b + 1 : ui->lib.games[i].path;
+        if (!strcmp(b, want)) {
+            ui->sel = i;
+            ui->pos = (float)i;
+            ui->tab = TAB_PLAY;
+            ui->focus_tabs = 0;
+        }
+    }
+    import_sel[0] = '\0';
+}
+
 /* ---------- курсор ---------- */
 
 static void draw_cursor(Ui *ui, uint32_t now)
@@ -1799,6 +1890,7 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
     library_scan(&ui.lib, games_dir);
     if (!ui.lib.dir[0])
         snprintf(ui.lib.dir, sizeof(ui.lib.dir), "%s", games_dir);
+    select_imported(&ui);
     layout(&ui);
     platform_display_size(&dw, &dh);
     platform_cursor_mode(1);
@@ -1839,6 +1931,13 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
                 }
             } else if (ev.type == EV_REFRESH) {
                 rescan(&ui, games_dir);
+                select_imported(&ui);
+            } else if (ev.type == EV_DROP && ev.name) {
+                /* перетащили JAR на окно — в папку игр и сразу на полку */
+                if (launcher_import(ui.lib.dir[0] ? ui.lib.dir : games_dir, ev.name)) {
+                    rescan(&ui, games_dir);
+                    select_imported(&ui);
+                }
             } else if (ev.type == EV_PAD_ADDED) {
                 ui.pad_connected = 1;
                 ui.pad_flash = now + 1600;

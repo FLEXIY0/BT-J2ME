@@ -1,10 +1,13 @@
 #include "platform.h"
+#include "compat.h"
 #include "cursor.h"
 #include "touch.h"
 #include "util.h"
 
 #include <SDL.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #ifdef __ANDROID__
 #include <jni.h>
 #endif
@@ -32,6 +35,22 @@ static void make_hand_cursor(void);
 static float         pad_ax, pad_ay; /* левый стик, -1..1 */
 static SDL_AudioDeviceID audio_dev;
 static AudioMixFn    audio_mix;
+static SDL_Rect      game_dst;      /* куда на окне ложится экран (без сенсорных кнопок) */
+
+/* Настройки ПК: полный экран, масштаб игр, звук, широкий экран по играм — <config>/bt-j2me/pc.cfg */
+#define MAX_WIDE 64
+static int           pc_full = 1, pc_scale = -1, pc_mute, pc_loaded;
+static char          pc_wide[MAX_WIDE][128];
+static int           pc_nwide;
+static char          pc_game[128];  /* игра, что сейчас идёт (для широкого экрана) */
+static volatile int  menu_open;     /* меню паузы */
+static void menu_close(void);
+static void menu_show(void);
+static int  menu_event(const SDL_Event *e);
+static void set_fullscreen(int on);
+static int  pc_wide_index(const char *id);
+static void pc_load(void);
+static void render(void);
 
 static void push(EventType type, int key)
 {
@@ -64,19 +83,49 @@ void platform_display_size(int *w, int *h)
 static void apply_scale(void)
 {
     int dw, dh, k;
+    float fk;
+    ScaleMode mode;
 
     if (touch_on) {
         /* с сенсорными кнопками картинку размещает touch.c (в портрете — сверху) */
         SDL_RenderSetLogicalSize(ren, 0, 0);
         return;
     }
+    /* Место считаем сами (а не SDL_RenderSetLogicalSize): так возможно «растянуть»,
+     * а координаты мыши переводим в экран игры в mouse_to_screen. */
+    SDL_RenderSetLogicalSize(ren, 0, 0);
     platform_display_size(&dw, &dh);
+    mode = !cursor_mode && pc_scale >= 0 ? (ScaleMode)pc_scale : scale_mode;   /* выбор из меню — для игр */
+    if (mode == SCALE_STRETCH) {
+        game_dst.x = game_dst.y = 0;
+        game_dst.w = dw;
+        game_dst.h = dh;
+        return;
+    }
     k = dw / screen.w < dh / screen.h ? dw / screen.w : dh / screen.h;
-    /* Логический размер + целый масштаб делает SDL; «авто» решаем сами. */
-    SDL_RenderSetLogicalSize(ren, screen.w, screen.h);
-    SDL_RenderSetIntegerScale(ren, scale_mode == SCALE_INTEGER ||
-                                   (scale_mode == SCALE_AUTO && k >= 1 && k * screen.h * 100 >= dh * 85)
-                                   ? SDL_TRUE : SDL_FALSE);
+    fk = (float)dw / (float)screen.w < (float)dh / (float)screen.h ? (float)dw / (float)screen.w
+                                                                   : (float)dh / (float)screen.h;
+    if (k >= 1 && (mode == SCALE_INTEGER || (mode == SCALE_AUTO && k * screen.h * 100 >= dh * 85)))
+        fk = (float)k;
+    game_dst.w = (int)((float)screen.w * fk);
+    game_dst.h = (int)((float)screen.h * fk);
+    game_dst.x = (dw - game_dst.w) / 2;
+    game_dst.y = (dh - game_dst.h) / 2;
+}
+
+/* Окно (в точках) → экран игры. */
+static void mouse_to_screen(int wx, int wy, int *x, int *y)
+{
+    int ww, wh, dw, dh;
+
+    SDL_GetWindowSize(win, &ww, &wh);
+    platform_display_size(&dw, &dh);
+    if (ww > 0 && wh > 0) {         /* на HiDPI пикселей больше, чем точек */
+        wx = wx * dw / ww;
+        wy = wy * dh / wh;
+    }
+    *x = game_dst.w > 0 ? (wx - game_dst.x) * screen.w / game_dst.w : wx;
+    *y = game_dst.h > 0 ? (wy - game_dst.y) * screen.h / game_dst.h : wy;
 }
 
 int platform_set_screen(int w, int h, ScaleMode mode)
@@ -118,7 +167,12 @@ static void touch_emit(EventType type, int key, int x, int y)
 
 int platform_init(const PlatformConfig *cfg)
 {
-    Uint32 wflags = cfg->fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : SDL_WINDOW_RESIZABLE;
+    Uint32 wflags;
+
+    pc_load();
+    if (!cfg->fullscreen)
+        pc_full = 0;        /* --windowed главнее сохранённого */
+    wflags = pc_full ? SDL_WINDOW_FULLSCREEN_DESKTOP : SDL_WINDOW_RESIZABLE;
     Uint32 rflags = cfg->software ? SDL_RENDERER_SOFTWARE : SDL_RENDERER_ACCELERATED;
 
     touch_on = cfg->touch;
@@ -252,6 +306,8 @@ void platform_fade_in(int ms)
     fade_t0 = 0;        /* отсчёт — с первого кадра игры: JVM ещё грузится */
 }
 
+static void menu_draw(void);
+
 static void render(void)
 {
     SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);   /* поля вокруг экрана — чёрные */
@@ -263,8 +319,11 @@ static void render(void)
         touch_place(w, h, screen.w, screen.h, scale_mode, &dst);
         SDL_RenderCopy(ren, tex, NULL, &dst);
         touch_draw();
-    } else
-        SDL_RenderCopy(ren, tex, NULL, NULL);
+    } else {
+        SDL_RenderCopy(ren, tex, NULL, &game_dst);
+        if (menu_open)
+            menu_draw();
+    }
     if (fade_ms > 0) {
         uint32_t now = SDL_GetTicks();
         float f;
@@ -292,11 +351,16 @@ void platform_touch_profile(const char *game_id)
 {
     if (touch_on)
         touch_profile(game_id);
+    snprintf(pc_game, sizeof(pc_game), "%s", game_id ? game_id : "");
+    if (!game_id)
+        menu_close();
 }
 
 int platform_touch_wide(void)
 {
-    return touch_on && touch_wide();
+    if (touch_on)
+        return touch_wide();
+    return pc_game[0] && pc_wide_index(pc_game) >= 0;
 }
 
 #ifdef __ANDROID__
@@ -450,6 +514,8 @@ static void translate(const SDL_Event *e)
 {
     int key;
 
+    if (menu_open && menu_event(e))
+        return;                         /* меню паузы забирает ввод себе */
     if (!touch_on && !cursor_mode) {    /* в игре рука видна, только пока мышью пользуются */
         if (e->type == SDL_MOUSEMOTION || e->type == SDL_MOUSEBUTTONDOWN) {
             mouse_seen = SDL_GetTicks();
@@ -460,6 +526,16 @@ static void translate(const SDL_Event *e)
         }
     }
     switch (e->type) {
+    case SDL_DROPFILE: {
+        static char paths[4][1024];     /* путь живёт, пока событие в очереди */
+        static int next;
+        char *dst = paths[next++ & 3];
+        snprintf(dst, sizeof(paths[0]), "%s", e->drop.file ? e->drop.file : "");
+        SDL_free(e->drop.file);
+        push(EV_DROP, 0);
+        queue[(q_head + q_len - 1) % QUEUE_LEN].name = dst;
+        break;
+    }
     case SDL_QUIT:
         push(EV_QUIT, 0);
         break;
@@ -481,9 +557,19 @@ static void translate(const SDL_Event *e)
                 push(EV_SCREENSHOT, 0);
             break;
         }
-        if (e->key.keysym.sym == SDLK_ESCAPE || e->key.keysym.sym == SDLK_AC_BACK) {
+        if (e->key.keysym.sym == SDLK_F11 ||
+            (e->key.keysym.sym == SDLK_RETURN && (e->key.keysym.mod & KMOD_ALT))) {
             if (e->type == SDL_KEYDOWN && !e->key.repeat)
-                push(EV_BACK, 0);
+                set_fullscreen(!pc_full);
+            break;
+        }
+        if (e->key.keysym.sym == SDLK_ESCAPE || e->key.keysym.sym == SDLK_AC_BACK) {
+            if (e->type == SDL_KEYDOWN && !e->key.repeat) {
+                if (!touch_on && !cursor_mode && screen.px)
+                    menu_show();        /* в игре на ПК — меню паузы, выход на полку в нём */
+                else
+                    push(EV_BACK, 0);
+            }
             break;
         }
         if (e->key.repeat || !(key = map_key(e->key.keysym.sym)))
@@ -516,8 +602,12 @@ static void translate(const SDL_Event *e)
     case SDL_CONTROLLERBUTTONDOWN:
     case SDL_CONTROLLERBUTTONUP:
         if (e->cbutton.button == SDL_CONTROLLER_BUTTON_GUIDE) {
-            if (e->type == SDL_CONTROLLERBUTTONDOWN)
-                push_pad(EV_BACK, 0);
+            if (e->type == SDL_CONTROLLERBUTTONDOWN) {
+                if (!touch_on && !cursor_mode)
+                    menu_show();
+                else
+                    push_pad(EV_BACK, 0);
+            }
         } else if ((key = map_button(e->cbutton.button)) != 0) {
             push_pad(e->type == SDL_CONTROLLERBUTTONDOWN ? EV_KEY_DOWN : EV_KEY_UP, key);
         }
@@ -544,20 +634,17 @@ static void translate(const SDL_Event *e)
     case SDL_MOUSEBUTTONUP:
         if (touch_on)
             break;      /* мышь уже пришла пальцем */
-        /* При SDL_RenderSetLogicalSize координаты уже приведены к виртуальному экрану. */
+        if (e->button.button != SDL_BUTTON_LEFT)
+            break;
         push(e->type == SDL_MOUSEBUTTONDOWN ? EV_POINTER_DOWN : EV_POINTER_UP, 0);
-        queue[(q_head + q_len - 1) % QUEUE_LEN].x = e->button.x;
-        queue[(q_head + q_len - 1) % QUEUE_LEN].y = e->button.y;
+        mouse_to_screen(e->button.x, e->button.y, &queue[(q_head + q_len - 1) % QUEUE_LEN].x,
+                        &queue[(q_head + q_len - 1) % QUEUE_LEN].y);
         break;
     case SDL_MOUSEMOTION:
-        if (!touch_on && (e->motion.state & SDL_BUTTON_LMASK)) {
-            push(EV_POINTER_MOVE, 0);
-            queue[(q_head + q_len - 1) % QUEUE_LEN].x = e->motion.x;
-            queue[(q_head + q_len - 1) % QUEUE_LEN].y = e->motion.y;
-        } else if (!touch_on && cursor_mode) {
-            push(EV_HOVER, 0);
-            queue[(q_head + q_len - 1) % QUEUE_LEN].x = e->motion.x;
-            queue[(q_head + q_len - 1) % QUEUE_LEN].y = e->motion.y;
+        if (!touch_on && ((e->motion.state & SDL_BUTTON_LMASK) || cursor_mode)) {
+            push(e->motion.state & SDL_BUTTON_LMASK ? EV_POINTER_MOVE : EV_HOVER, 0);
+            mouse_to_screen(e->motion.x, e->motion.y, &queue[(q_head + q_len - 1) % QUEUE_LEN].x,
+                            &queue[(q_head + q_len - 1) % QUEUE_LEN].y);
         }
         break;
     }
@@ -573,7 +660,7 @@ int platform_poll(Event *ev)
     }
     while (!q_len && SDL_PollEvent(&e))
         translate(&e);
-    if (mouse_shown && !cursor_mode && SDL_GetTicks() - mouse_seen > 2500 &&
+    if (mouse_shown && !cursor_mode && !menu_open && SDL_GetTicks() - mouse_seen > 2500 &&
         !(SDL_GetMouseState(NULL, NULL) & SDL_BUTTON_LMASK))
         show_mouse(0);
     if (touch_on) {
@@ -608,7 +695,10 @@ void platform_sleep_ms(uint32_t ms)
 static void SDLCALL audio_cb(void *ud, Uint8 *stream, int len)
 {
     (void)ud;
-    audio_mix((int16_t *)stream, len / 2);
+    if (pc_mute || menu_open)           /* звук выключен в меню или игра на паузе */
+        memset(stream, 0, (size_t)len);
+    else
+        audio_mix((int16_t *)stream, len / 2);
 }
 
 int platform_audio_open(int rate, AudioMixFn mix)
@@ -656,4 +746,342 @@ void platform_audio_close(void)
     SDL_CloseAudioDevice(audio_dev);
     audio_dev = 0;
     SDL_QuitSubSystem(SDL_INIT_AUDIO);
+}
+
+/* ---------- настройки ПК и меню паузы ---------- */
+
+static void pc_path(char *out, size_t cap, int mkdirs)
+{
+    const char *xdg = getenv("XDG_CONFIG_HOME"), *app = bt_appdata();
+    char dir[1024];
+
+    if (xdg && *xdg)
+        snprintf(dir, sizeof(dir), "%s/bt-j2me", xdg);
+    else if (app)
+        snprintf(dir, sizeof(dir), "%s/bt-j2me", app);
+    else
+        snprintf(dir, sizeof(dir), "%s/.config/bt-j2me", bt_home());
+    if (mkdirs)
+        bt_mkdirs(dir);
+    snprintf(out, cap, "%s/pc.cfg", dir);
+}
+
+static void pc_load(void)
+{
+    char path[1100], line[256];
+    FILE *f;
+
+    pc_loaded = 1;
+    pc_path(path, sizeof(path), 0);
+    if (!(f = bt_fopen(path, "rb")))
+        return;
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (!strncmp(line, "fullscreen ", 11))
+            pc_full = atoi(line + 11) != 0;
+        else if (!strncmp(line, "scale ", 6))
+            pc_scale = atoi(line + 6);
+        else if (!strncmp(line, "mute ", 5))
+            pc_mute = atoi(line + 5) != 0;
+        else if (!strncmp(line, "wide ", 5) && pc_nwide < MAX_WIDE)
+            snprintf(pc_wide[pc_nwide++], sizeof(pc_wide[0]), "%.127s", line + 5);
+    }
+    fclose(f);
+    if (pc_scale < -1 || pc_scale > SCALE_STRETCH)
+        pc_scale = -1;
+}
+
+static void pc_save(void)
+{
+    char path[1100];
+    FILE *f;
+    int i;
+
+    pc_path(path, sizeof(path), 1);
+    if (!(f = bt_fopen(path, "wb")))
+        return;
+    fprintf(f, "fullscreen %d\nscale %d\nmute %d\n", pc_full, pc_scale, pc_mute);
+    for (i = 0; i < pc_nwide; i++)
+        fprintf(f, "wide %s\n", pc_wide[i]);
+    fclose(f);
+}
+
+static int pc_wide_index(const char *id)
+{
+    int i;
+
+    for (i = 0; i < pc_nwide; i++)
+        if (!strcmp(pc_wide[i], id))
+            return i;
+    return -1;
+}
+
+static void set_fullscreen(int on)
+{
+    pc_full = on;
+    SDL_SetWindowFullscreen(win, on ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+    pc_save();
+    apply_scale();
+}
+
+/* Пункты меню. */
+enum { MI_RESUME, MI_FULL, MI_SCALE, MI_WIDE, MI_SOUND, MI_SHOT, MI_EXIT, MI_COUNT };
+
+#define MENU_W     196
+#define MENU_ROW   18
+#define MENU_TOP   30
+#define MENU_H     (MENU_TOP + MI_COUNT * MENU_ROW + 10)
+
+static int          menu_sel, menu_dirty, menu_k, menu_stick;
+static Image        menu_img;
+static SDL_Texture *menu_tex;
+static SDL_Rect     menu_dst;
+
+static void menu_label(int i, char *out, size_t cap)
+{
+    static const char *const scales[] = { "чёткий", "по размеру", "авто", "растянуть" };
+    int sc = pc_scale >= 0 ? pc_scale : (int)scale_mode;
+
+    switch (i) {
+    case MI_RESUME: snprintf(out, cap, "Продолжить"); break;
+    case MI_FULL:   snprintf(out, cap, "Экран: %s", pc_full ? "полный" : "окно"); break;
+    case MI_SCALE:  snprintf(out, cap, "Масштаб: %s", scales[sc < 0 || sc > 3 ? 2 : sc]); break;
+    case MI_WIDE:   snprintf(out, cap, "Широкий экран: %s", pc_wide_index(pc_game) >= 0 ? "да" : "нет"); break;
+    case MI_SOUND:  snprintf(out, cap, "Звук: %s", pc_mute ? "выкл" : "вкл"); break;
+    case MI_SHOT:   snprintf(out, cap, "Снимок экрана"); break;
+    default:        snprintf(out, cap, "Выйти на полку"); break;
+    }
+}
+
+static void menu_show(void)
+{
+    if (menu_open)
+        return;
+    menu_open = 1;
+    menu_sel = MI_RESUME;
+    menu_dirty = 1;
+    show_mouse(1);
+    if (hand_cursor)
+        SDL_SetCursor(hand_cursor);
+    if (tex)
+        render();       /* игра на паузе кадров не шлёт — рисуем сами */
+}
+
+static void menu_close(void)
+{
+    if (!menu_open)
+        return;
+    menu_open = 0;
+    show_mouse(0);
+    if (tex)
+        render();
+}
+
+static void menu_draw(void)
+{
+    int dw, dh, i;
+
+    if (!menu_img.px) {
+        menu_img = image_new(MENU_W, MENU_H);
+        if (!menu_img.px)
+            return;
+    }
+    if (!menu_tex) {
+        menu_tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, MENU_W, MENU_H);
+        if (!menu_tex)
+            return;
+        SDL_SetTextureBlendMode(menu_tex, SDL_BLENDMODE_BLEND);
+        menu_dirty = 1;
+    }
+    if (menu_dirty) {
+        Image *m = &menu_img;
+        char s[64];
+        menu_dirty = 0;
+        gfx_fill(m, 0, 0, MENU_W, MENU_H, 0xF21A1724u);
+        gfx_frame(m, 0, 0, MENU_W, MENU_H, 0xFF3A3450u);
+        gfx_text(m, &font_big, (MENU_W - gfx_text_width(&font_big, "Пауза", 1)) / 2, 7, "Пауза", 0xFFEDE8F2u, 1);
+        gfx_fill(m, 10, MENU_TOP - 4, MENU_W - 20, 1, 0xFF3A3450u);
+        for (i = 0; i < MI_COUNT; i++) {
+            int y = MENU_TOP + i * MENU_ROW;
+            menu_label(i, s, sizeof(s));
+            if (i == menu_sel)
+                gfx_fill(m, 6, y, MENU_W - 12, MENU_ROW - 2, 0xFF2E2944u);
+            if (i == menu_sel)
+                gfx_fill(m, 6, y, 2, MENU_ROW - 2, 0xFF9C8FF0u);
+            gfx_text(m, &font_mid, 14, y + 1, s, i == menu_sel ? 0xFFF4F0FFu : 0xFF8F8899u, 1);
+        }
+        SDL_UpdateTexture(menu_tex, NULL, menu_img.px, MENU_W * 4);
+    }
+    platform_display_size(&dw, &dh);
+    menu_k = dw * 7 / 10 / MENU_W < dh * 8 / 10 / MENU_H ? dw * 7 / 10 / MENU_W : dh * 8 / 10 / MENU_H;
+    if (menu_k < 1)
+        menu_k = 1;
+    menu_dst.w = MENU_W * menu_k;
+    menu_dst.h = MENU_H * menu_k;
+    menu_dst.x = (dw - menu_dst.w) / 2;
+    menu_dst.y = (dh - menu_dst.h) / 2;
+    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(ren, 0, 0, 0, 150);  /* игра темнеет под меню */
+    SDL_RenderFillRect(ren, NULL);
+    SDL_RenderCopy(ren, menu_tex, NULL, &menu_dst);
+}
+
+/* Строка меню под мышью или -1. */
+static int menu_hit(int wx, int wy)
+{
+    int ww, wh, dw, dh, row;
+
+    SDL_GetWindowSize(win, &ww, &wh);
+    platform_display_size(&dw, &dh);
+    if (ww > 0 && wh > 0) {
+        wx = wx * dw / ww;
+        wy = wy * dh / wh;
+    }
+    if (menu_k < 1 || wx < menu_dst.x || wx >= menu_dst.x + menu_dst.w)
+        return -1;
+    row = ((wy - menu_dst.y) / menu_k - MENU_TOP);
+    if (row < 0 || row / MENU_ROW >= MI_COUNT)
+        return -1;
+    return row / MENU_ROW;
+}
+
+static void menu_activate(int dir)
+{
+    switch (menu_sel) {
+    case MI_RESUME:
+        menu_close();
+        return;
+    case MI_FULL:
+        set_fullscreen(!pc_full);
+        break;
+    case MI_SCALE: {
+        /* авто → чёткий → по размеру → растянуть */
+        static const int order[] = { SCALE_AUTO, SCALE_INTEGER, SCALE_FIT, SCALE_STRETCH };
+        int cur = pc_scale >= 0 ? pc_scale : (int)scale_mode, i, n = 4;
+        for (i = 0; i < n && order[i] != cur; i++)
+            ;
+        pc_scale = order[((i < n ? i : 0) + (dir < 0 ? n - 1 : 1)) % n];
+        pc_save();
+        apply_scale();
+        break;
+    }
+    case MI_WIDE: {
+        int i = pc_wide_index(pc_game);
+        if (!pc_game[0])
+            break;
+        if (i >= 0)
+            memmove(pc_wide[i], pc_wide[i + 1], (size_t)(pc_nwide-- - i - 1) * sizeof(pc_wide[0]));
+        else if (pc_nwide < MAX_WIDE)
+            snprintf(pc_wide[pc_nwide++], sizeof(pc_wide[0]), "%s", pc_game);
+        pc_save();
+        menu_close();
+        push(EV_RESTART, 0);        /* размер экрана игры меняется только с перезапуском */
+        return;
+    }
+    case MI_SOUND:
+        pc_mute = !pc_mute;
+        pc_save();
+        break;
+    case MI_SHOT:
+        menu_close();
+        push(EV_SCREENSHOT, 0);
+        return;
+    default:
+        menu_close();
+        push(EV_BACK, 0);
+        return;
+    }
+    menu_dirty = 1;
+    render();
+}
+
+static void menu_move(int d)
+{
+    menu_sel = (menu_sel + d + MI_COUNT) % MI_COUNT;
+    menu_dirty = 1;
+    render();
+}
+
+/* Ввод, пока меню открыто: 1 — событие съедено. */
+static int menu_event(const SDL_Event *e)
+{
+    int i;
+
+    switch (e->type) {
+    case SDL_KEYDOWN:
+        switch (e->key.keysym.sym) {
+        case SDLK_ESCAPE: case SDLK_AC_BACK: case SDLK_BACKSPACE:
+            if (!e->key.repeat)
+                menu_close();
+            return 1;
+        case SDLK_UP: case SDLK_w: menu_move(-1); return 1;
+        case SDLK_DOWN: case SDLK_s: menu_move(1); return 1;
+        case SDLK_LEFT: case SDLK_a:
+            if (menu_sel == MI_SCALE || menu_sel == MI_FULL || menu_sel == MI_SOUND)
+                menu_activate(-1);
+            return 1;
+        case SDLK_RIGHT: case SDLK_d:
+            if (menu_sel == MI_SCALE || menu_sel == MI_FULL || menu_sel == MI_SOUND)
+                menu_activate(1);
+            return 1;
+        case SDLK_RETURN: case SDLK_SPACE: case SDLK_KP_ENTER:
+            if (e->key.keysym.mod & KMOD_ALT)
+                return 0;               /* Alt+Enter — полный экран, как везде */
+            if (!e->key.repeat)
+                menu_activate(1);
+            return 1;
+        case SDLK_F11: case SDLK_F10: case SDLK_F12:
+            return 0;
+        default:
+            return 1;
+        }
+    case SDL_KEYUP: case SDL_TEXTINPUT:
+        return 1;
+    case SDL_CONTROLLERBUTTONDOWN:
+        switch (e->cbutton.button) {
+        case SDL_CONTROLLER_BUTTON_DPAD_UP: menu_move(-1); break;
+        case SDL_CONTROLLER_BUTTON_DPAD_DOWN: menu_move(1); break;
+        case SDL_CONTROLLER_BUTTON_DPAD_LEFT: menu_activate(-1); break;
+        case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: case SDL_CONTROLLER_BUTTON_A: menu_activate(1); break;
+        case SDL_CONTROLLER_BUTTON_B: case SDL_CONTROLLER_BUTTON_BACK: case SDL_CONTROLLER_BUTTON_GUIDE:
+        case SDL_CONTROLLER_BUTTON_START:
+            menu_close();
+            break;
+        }
+        return 1;
+    case SDL_CONTROLLERBUTTONUP:
+        return 1;
+    case SDL_CONTROLLERAXISMOTION:
+        if (e->caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) {
+            int d = e->caxis.value < -STICK_PRESS ? -1 : e->caxis.value > STICK_PRESS ? 1 : 0;
+            if (d && d != menu_stick)
+                menu_move(d);
+            menu_stick = d;
+        }
+        return 1;
+    case SDL_MOUSEMOTION:
+        if ((i = menu_hit(e->motion.x, e->motion.y)) >= 0 && i != menu_sel) {
+            menu_sel = i;
+            menu_dirty = 1;
+            render();
+        }
+        return 1;
+    case SDL_MOUSEBUTTONDOWN:
+        if (e->button.button == SDL_BUTTON_LEFT && (i = menu_hit(e->button.x, e->button.y)) >= 0) {
+            menu_sel = i;
+            menu_activate(1);
+        } else if (e->button.button == SDL_BUTTON_RIGHT) {
+            menu_close();
+        }
+        return 1;
+    case SDL_MOUSEBUTTONUP: case SDL_MOUSEWHEEL:
+        return 1;
+    default:
+        return 0;               /* окно, выход, геймпады — как обычно */
+    }
+}
+
+int platform_paused(void)
+{
+    return menu_open;
 }

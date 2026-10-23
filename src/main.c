@@ -1,6 +1,9 @@
 #include "audio.h"
 #ifdef __ANDROID__
 #include <SDL_system.h>
+#elif defined(_WIN32)
+#include <SDL_filesystem.h>
+#include <SDL_stdinc.h>
 #endif
 #include "classfile.h"
 #include "jar.h"
@@ -270,8 +273,13 @@ static void default_games_dir(char *out, size_t cap)
         bt_mkdir(out);
     }
 #elif defined(_WIN32)
-        /* на Windows — папка games рядом с bt-j2me.exe (при запуске двойным щелчком это текущая папка) */
-        snprintf(out, cap, "games");
+    {
+        /* на Windows — папка games рядом с bt-j2me.exe, откуда бы его ни запустили
+         * (при перетаскивании JAR на exe текущая папка — чужая) */
+        char *base = SDL_GetBasePath();
+        snprintf(out, cap, "%sgames", base ? base : "");
+        SDL_free(base);
+    }
 #else
         snprintf(out, cap, "%s/.local/share/bt-j2me/games", bt_home());
 #endif
@@ -280,6 +288,21 @@ static void default_games_dir(char *out, size_t cap)
 static int is_dir(const char *path)
 {
     return bt_is_dir(path);
+}
+
+/* Существующий .jar или .jad. */
+static int is_game_file(const char *path)
+{
+    size_t n = strlen(path);
+    FILE *f;
+
+    if (n < 5 || path[n - 4] != '.' || (strcmp(path + n - 3, "jar") && strcmp(path + n - 3, "jad") &&
+                                         strcmp(path + n - 3, "JAR") && strcmp(path + n - 3, "JAD")))
+        return 0;
+    if (!(f = bt_fopen(path, "rb")))
+        return 0;
+    fclose(f);
+    return 1;
 }
 
 int main(int argc, char **argv)
@@ -311,6 +334,15 @@ int main(int argc, char **argv)
     if (argc >= 2 && strcmp(argv[1], "--version") == 0) {
         puts("BT-J2ME " BT_VERSION);
         return 0;
+    }
+    if (argc >= 2 && is_game_file(argv[1])) {
+        /* JAR перетащили на bt-j2me.exe (или «Открыть с помощью»): кладём в папку игр
+         * и открываем полку прямо на нём */
+        int i;
+        default_games_dir(dir, sizeof(dir));
+        for (i = 1; i < argc && is_game_file(argv[i]); i++)
+            launcher_import(dir, argv[i]);
+        return parse_opts(argc, argv, i, &cfg) ? 2 : launcher_run(dir, &cfg);
     }
     if (argc < 2 || argv[1][0] == '-' || is_dir(argv[1])) {
         int first_opt = argc >= 2 && argv[1][0] != '-' ? 2 : 1;
