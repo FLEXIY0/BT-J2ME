@@ -60,6 +60,18 @@ jobs:
         with:
           packages: gcc-mingw-w64-x86-64 libz-mingw-w64-dev
           version: 1
+      # из кэша пакеты возвращаются без ссылок update-alternatives — ставим ссылку на компилятор сами
+      - name: Компилятор MinGW
+        run: |
+          if ! command -v x86_64-w64-mingw32-gcc >/dev/null; then
+            for v in posix win32; do
+              if [ -x /usr/bin/x86_64-w64-mingw32-gcc-$v ]; then
+                sudo ln -sf /usr/bin/x86_64-w64-mingw32-gcc-$v /usr/local/bin/x86_64-w64-mingw32-gcc
+                break
+              fi
+            done
+          fi
+          x86_64-w64-mingw32-gcc --version | head -1
       - name: Сборка
         run: sh tools/build-windows.sh
       - name: Архив
