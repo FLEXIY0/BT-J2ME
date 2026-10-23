@@ -6,7 +6,9 @@
 #include "png.h"
 #include "audio.h"
 #include "cursor.h"
+#include "update.h"
 #include "util.h"
+#include "version.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -70,7 +72,8 @@ typedef struct {
     char         ce_files[48][64];
     Image        ce_img;
     float        ce_cx, ce_cy, ce_cw, ce_dx, ce_dy;
-    int          rs, rs_sel, rs_n;   /* окно «стереть сохранения игры?»: выбрана кнопка, сколько файлов */
+    int          rs, rs_sel, rs_n;
+    int          upd_hide, upd_sel;     /* окно обновления: закрыто до следующего запуска, кнопка */   /* окно «стереть сохранения игры?»: выбрана кнопка, сколько файлов */
     int          fx;            /* вид анимации запуска */
     int          ptr_down, ptr_x0, ptr_y0, ptr_x, ptr_y;   /* касание: тап или свайп решаем при отпускании */
     uint32_t     pad_flash;
@@ -146,6 +149,9 @@ static const Icon icon_cross = { 9, 9, {
 static const Icon icon_trash = { 9, 9, {
     "...###...", "#########", ".#.....#.", ".#.#.#.#.", ".#.#.#.#.",
     ".#.#.#.#.", ".#.#.#.#.", ".#.....#.", "..#####.." } };
+static const Icon icon_download = { 11, 11, {
+    "....###....", "....###....", "....###....", "....###....", ".#########.",
+    "..#######..", "...#####...", "....###....", ".....#.....", "...........", "###########" } };
 static const Icon icon_camera = { 11, 9, {
     "...###.....", "###########", "#...###...#", "#..#...#..#", "#..#...#..#",
     "#..#...#..#", "#...###...#", "###########", "..........." } };
@@ -1725,6 +1731,103 @@ static void rs_event(Ui *ui, const Event *ev)
     }
 }
 
+/* ---------- обновление программы: окно поверх полки ---------- */
+
+static int upd_shown(const Ui *ui)
+{
+    UpdState s = update_state();
+
+    return !ui->upd_hide && (s == UPD_AVAILABLE || s == UPD_DOWNLOADING || s == UPD_FAILED);
+}
+
+static void upd_geom(const Ui *ui, int *x, int *y, int *w, int *h, int *by, int *bw)
+{
+    *w = imin(ui->W - 2 * ui->m, 150 * ui->s);
+    *h = imin(ui->H - 2 * ui->m, 84 * ui->s);
+    *x = (ui->W - *w) / 2;
+    *y = (ui->H - *h) / 2;
+    *bw = (*w - 3 * 6) / 2;
+    *by = *y + *h - 6 - 15 * ui->s;
+}
+
+static void draw_update(Ui *ui)
+{
+    static const Icon *const icons[2] = { &icon_cross, &icon_check };
+    Image *s = ui->scr;
+    UpdState st = update_state();
+    int x, y, w, h, by, bw, i, cx = ui->W / 2, ty;
+    char line[64];
+
+    upd_geom(ui, &x, &y, &w, &h, &by, &bw);
+    gfx_fill(s, 0, 0, ui->W, ui->H, 0x90000000u);
+    rrect(s, x, y, w, h, 3, ui->th->bg_top);
+    draw_icon(s, &icon_download, cx - icon_download.w * ui->s, y + 7, 2 * ui->s,
+              st == UPD_FAILED ? 0xFFE2483Du : ui->th->accent, 0);
+    ty = y + 7 + icon_download.h * 2 * ui->s + 5;
+    if (st == UPD_FAILED) {
+        text_fit(s, cx, ty, w - 8, "Не удалось обновиться", ui->th->text, 0);
+        text_fit(s, cx, ty + font_small.h + 3, w - 8, "проверьте интернет", ui->th->sub, 0);
+    } else {
+        snprintf(line, sizeof(line), "Новая версия %s", update_version());
+        text_fit(s, cx, ty, w - 8, line, ui->th->text, 0);
+        snprintf(line, sizeof(line), "сейчас %s", BT_VERSION);
+        text_fit(s, cx, ty + font_small.h + 3, w - 8, line, ui->th->sub, 0);
+    }
+    if (st == UPD_DOWNLOADING) {
+        int pw = w - 12, p = imax(0, imin(100, update_progress()));
+        rrect(s, x + 6, by + 4 * ui->s, pw, 7 * ui->s, 2, ui->th->tab_hi);
+        if (p)
+            rrect(s, x + 6, by + 4 * ui->s, imax(4, pw * p / 100), 7 * ui->s, 2, ui->th->accent);
+        return;
+    }
+    for (i = 0; i < 2; i++) {
+        int bx = x + 6 + i * (bw + 6), sel = st == UPD_FAILED ? i == 1 : i == ui->upd_sel;
+        if (st == UPD_FAILED && i == 0)
+            continue;           /* после ошибки — одна кнопка «понятно» */
+        rrect(s, bx, by, bw, 15 * ui->s, 2, sel ? ui->th->accent : ui->th->tab_hi);
+        draw_icon(s, icons[i], bx + (bw - icons[i]->w * ui->s) / 2, by + (15 * ui->s - icons[i]->h * ui->s) / 2,
+                  ui->s, sel ? 0xFFFFFFFFu : ui->th->text, 0);
+    }
+}
+
+static void upd_action(Ui *ui, int yes)
+{
+    UpdState st = update_state();
+
+    if (st == UPD_AVAILABLE && yes)
+        update_install();
+    else if (st != UPD_DOWNLOADING)
+        ui->upd_hide = 1;       /* «не сейчас» — спросим при следующем запуске */
+}
+
+static void upd_event(Ui *ui, const Event *ev)
+{
+    int x, y, w, h, by, bw;
+
+    upd_geom(ui, &x, &y, &w, &h, &by, &bw);
+    switch (ev->type) {
+    case EV_BACK:
+        upd_action(ui, 0);
+        break;
+    case EV_KEY_DOWN:
+        if (ev->key == KEY_LEFT || ev->key == KEY_NUM0 + 4)
+            ui->upd_sel = 0;
+        else if (ev->key == KEY_RIGHT || ev->key == KEY_NUM0 + 6)
+            ui->upd_sel = 1;
+        else if (ev->key == KEY_FIRE || ev->key == KEY_NUM0 + 5 || ev->key == KEY_SOFT_LEFT)
+            upd_action(ui, update_state() == UPD_FAILED || ui->upd_sel);
+        else if (ev->key == KEY_SOFT_RIGHT || ev->key == KEY_CLEAR)
+            upd_action(ui, 0);
+        break;
+    case EV_POINTER_UP:
+        if (ev->y >= by && ev->y < by + 15 * ui->s && ev->x >= x && ev->x < x + w)
+            upd_action(ui, ev->x >= x + w / 2);
+        break;
+    default:
+        break;
+    }
+}
+
 static void on_pointer(Ui *ui, int px, int py, uint32_t now)
 {
     int i;
@@ -2032,6 +2135,8 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
     platform_display_size(&dw, &dh);
     platform_cursor_mode(1);
     prev = platform_ticks_ms();
+    ui.upd_sel = 1;
+    update_check();         /* в фоне: есть ли новый выпуск */
 
     while (running) {
         uint32_t now = platform_ticks_ms();
@@ -2058,6 +2163,11 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
             }
             if (ui.rs && ev.type != EV_QUIT) {
                 rs_event(&ui, &ev);
+                continue;
+            }
+            if (upd_shown(&ui) && !ui.launch_t0 && ev.type != EV_QUIT && ev.type != EV_REFRESH &&
+                ev.type != EV_DROP && ev.type != EV_PAD_ADDED) {
+                upd_event(&ui, &ev);
                 continue;
             }
             if (ui.launch_t0)
@@ -2125,6 +2235,8 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
         else if (row > ui.grid_scroll + (float)visible_rows - 1)
             ui.grid_scroll += (row - (float)visible_rows + 1 - ui.grid_scroll) * clampf(dt * 14.0f, 0, 1);
 
+        if (update_need_restart())
+            running = 0;        /* программа обновилась — main запустит новую версию */
         if (!ui.launch_t0)
             cursor_stick(&ui, dt, now);
         load_covers(&ui, now);
@@ -2145,6 +2257,8 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
             draw_tabs(&ui);
             if (ui.rs)
                 draw_reset(&ui);
+            else if (upd_shown(&ui) && !ui.launch_t0)
+                draw_update(&ui);
             ui.launch_t0 = l0;
             if (ui.launch_t0) {
                 ui.snap = image_new(ui.W, ui.H);

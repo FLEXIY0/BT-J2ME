@@ -20,9 +20,8 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#ifndef BT_VERSION
-#define BT_VERSION "0.1.0-dev"   /* в CI подставляется номер сборки: make VERSION=0.1.42 */
-#endif
+#include "update.h"
+#include "version.h"
 
 /* Минималистичная палитра: тёмный фон, один акцентный цвет. */
 #define COL_BG     0xFF101214u
@@ -344,7 +343,11 @@ int main(int argc, char **argv)
         default_games_dir(dir, sizeof(dir));
         for (i = 1; i < argc && is_game_file(argv[i]); i++)
             launcher_import(dir, argv[i]);
-        return parse_opts(argc, argv, i, &cfg) ? 2 : launcher_run(dir, &cfg);
+        if (parse_opts(argc, argv, i, &cfg))
+            return 2;
+        i = launcher_run(dir, &cfg);
+        update_relaunch(1, argv);     /* после обновления — новая версия, просто полка */
+        return i;
     }
     if (argc < 2 || argv[1][0] == '-' || is_dir(argv[1])) {
         int first_opt = argc >= 2 && argv[1][0] != '-' ? 2 : 1;
@@ -353,7 +356,11 @@ int main(int argc, char **argv)
             snprintf(dir, sizeof(dir), "%s", argv[1]);
         else
             default_games_dir(dir, sizeof(dir));
-        return parse_opts(argc, argv, first_opt, &cfg) ? 2 : launcher_run(dir, &cfg);
+        if (parse_opts(argc, argv, first_opt, &cfg))
+            return 2;
+        first_opt = launcher_run(dir, &cfg);
+        update_relaunch(argc, argv);    /* обновились — запускаем новую версию */
+        return first_opt;
     }
     if (strcmp(argv[1], "info") == 0 && argc == 3)
         return cmd_info(argv[2]);

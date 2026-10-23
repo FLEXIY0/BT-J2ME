@@ -1,6 +1,7 @@
 /* Бэкенд без экрана: для серверов, CI и проверки JAR-ов. */
 #define _POSIX_C_SOURCE 199309L
 #include "platform.h"
+#include "update.h"
 #include "util.h"
 
 #include <stdlib.h>
@@ -89,3 +90,12 @@ const char *platform_locale(void)
     const char *env = getenv("BT_LOCALE");
     return env && *env ? env : "en-US";
 }
+
+/* без графики обновлений нет */
+void update_check(void) {}
+UpdState update_state(void) { return UPD_IDLE; }
+const char *update_version(void) { return ""; }
+int update_progress(void) { return 0; }
+void update_install(void) {}
+int update_need_restart(void) { return 0; }
+void update_relaunch(int argc, char **argv) { (void)argc; (void)argv; }

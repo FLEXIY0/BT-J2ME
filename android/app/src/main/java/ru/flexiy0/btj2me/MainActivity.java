@@ -9,10 +9,13 @@ import android.os.Bundle;
 import android.provider.OpenableColumns;
 import android.util.Log;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -56,6 +59,92 @@ public class MainActivity extends SDLActivity {
             Log.w(TAG, "не открыть " + url, e);
             return false;
         }
+    }
+
+    /* ---------- обновление (src/update.c зовёт из своего потока) ---------- */
+
+    private static HttpURLConnection open(String url) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        if (c instanceof javax.net.ssl.HttpsURLConnection && Build.VERSION.SDK_INT < 21)
+            ((javax.net.ssl.HttpsURLConnection) c).setSSLSocketFactory(new Tls12SocketFactory());
+        c.setConnectTimeout(15000);
+        c.setReadTimeout(30000);
+        c.setInstanceFollowRedirects(true);
+        c.setRequestProperty("User-Agent", "BT-J2ME");
+        c.setRequestProperty("Accept", "application/vnd.github+json, */*");
+        return c;
+    }
+
+    /* GitHub отдаёт файл выпуска переадресацией на другой хост — идём по ней сами. */
+    private static HttpURLConnection follow(String url) throws Exception {
+        for (int i = 0; i < 5; i++) {
+            HttpURLConnection c = open(url);
+            int code = c.getResponseCode();
+            if (code / 100 != 3)
+                return code == 200 ? c : null;
+            url = new URL(new URL(url), c.getHeaderField("Location")).toString();
+            c.disconnect();
+        }
+        return null;
+    }
+
+    public byte[] httpGet(String url) {
+        try {
+            HttpURLConnection c = follow(url);
+            if (c == null)
+                return null;
+            InputStream in = c.getInputStream();
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] buf = new byte[16384];
+            int n;
+            while ((n = in.read(buf)) > 0 && out.size() < (1 << 20))
+                out.write(buf, 0, n);
+            in.close();
+            return out.toByteArray();
+        } catch (Exception e) {
+            Log.w(TAG, "не скачать " + url, e);
+            return null;
+        }
+    }
+
+    public boolean download(String url, String path) {
+        File f = new File(path);
+        try {
+            HttpURLConnection c = follow(url);
+            if (c == null)
+                return false;
+            InputStream in = c.getInputStream();
+            OutputStream out = new FileOutputStream(f);
+            byte[] buf = new byte[65536];
+            int n;
+            while ((n = in.read(buf)) > 0)
+                out.write(buf, 0, n);
+            out.close();
+            in.close();
+            return true;
+        } catch (Exception e) {
+            Log.w(TAG, "не скачать " + url, e);
+            f.delete();
+            return false;
+        }
+    }
+
+    /* Системная установка скачанного APK: новая версия встаёт поверх, данные остаются. */
+    public void installApk(final String path) {
+        runOnUiThread(new Runnable() {
+            public void run() {
+                try {
+                    Intent i = new Intent(Intent.ACTION_VIEW);
+                    Uri uri = Build.VERSION.SDK_INT >= 24 ? ApkProvider.uri(MainActivity.this)
+                                                          : Uri.fromFile(new File(path));
+                    i.setDataAndType(uri, "application/vnd.android.package-archive");
+                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    startActivity(i);
+                } catch (Exception e) {
+                    Log.w(TAG, "не открыть установку " + path, e);
+                }
+            }
+        });
     }
 
     /* Зовётся из C (platform_import_games) в потоке игры. */
