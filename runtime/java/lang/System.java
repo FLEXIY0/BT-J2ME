@@ -27,7 +27,7 @@ public final class System {
         if (key.equals("microedition.encoding"))
             return "UTF-8";
         if (key.equals("microedition.locale"))
-            return "en-US";
+            return btvm.Native.locale();
         if (key.equals("microedition.io.file.FileConnection.version"))
             return null;
         return null;

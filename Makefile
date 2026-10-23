@@ -5,6 +5,7 @@
 #   make CROSS=arm-linux-gnueabihf-   кросс-сборка (armhf, aarch64, i686, mipsel ...)
 #   make CFLAGS="-O2 -march=pentium2" сборка под конкретный старый процессор
 #   make STATIC=1                 статическая сборка (если есть статические libSDL2/libz)
+#   make VERSION=0.1.42           номер версии (его ставит CI)
 
 CROSS    ?=
 ifeq ($(origin CC),default)
@@ -16,6 +17,9 @@ BACKEND  ?= sdl2
 CFLAGS   ?= -Os -pipe
 override CFLAGS += -std=c99 -Wall -Wextra -Wno-unused-parameter
 override LDLIBS += -lz -lm
+ifdef VERSION
+override CFLAGS += -DBT_VERSION='"$(VERSION)"'
+endif
 
 ifeq ($(BACKEND),sdl2)
 SDL_CFLAGS := $(shell $(PKG) --cflags sdl2 2>/dev/null || sdl2-config --cflags)
@@ -30,7 +34,8 @@ endif
 
 SRC := src/main.c src/jar.c src/manifest.c src/classfile.c src/png.c src/gfx.c \
        src/library.c src/launcher.c src/platform_$(BACKEND).c \
-       src/jvm_core.c src/jvm_interp.c src/jvm_lib.c src/rt.c src/midp.c src/audio.c
+       src/jvm_core.c src/jvm_interp.c src/jvm_lib.c src/rt.c src/midp.c src/audio.c src/compat.c \
+       $(if $(filter sdl2,$(BACKEND)),src/touch.c src/multitap.c)
 OBJ := $(SRC:.c=.o)
 
 bt-j2me: $(OBJ)
@@ -42,8 +47,8 @@ src/%.o: src/%.c $(wildcard src/*.h)
 tests/png_dump: tests/png_dump.c src/png.c src/png.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/png_dump.c src/png.c -lz
 
-tests/pad_test: tests/pad_test.c src/platform_sdl2.c src/gfx.c $(wildcard src/*.h)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/pad_test.c src/platform_sdl2.c src/gfx.c $(LDLIBS)
+tests/pad_test: tests/pad_test.c src/platform_sdl2.c src/gfx.c src/touch.c src/multitap.c src/compat.c $(wildcard src/*.h)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/pad_test.c src/platform_sdl2.c src/gfx.c src/touch.c src/multitap.c src/compat.c $(LDLIBS)
 
 TEST_BINS := tests/png_dump $(if $(filter sdl2,$(BACKEND)),tests/pad_test)
 
@@ -54,7 +59,7 @@ strip: bt-j2me
 	$(CROSS)strip -s bt-j2me
 
 clean:
-	rm -f bt-j2me src/*.o tests/png_dump tests/pad_test
+	rm -f bt-j2me bt-j2me.exe src/*.o tests/png_dump tests/pad_test
 	rm -rf tests/out
 
 .PHONY: test strip clean

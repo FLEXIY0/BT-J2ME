@@ -3,6 +3,7 @@
 #include "platform.h"
 #include "util.h"
 
+#include <stdlib.h>
 #include <time.h>
 
 static Image screen;
@@ -66,3 +67,25 @@ int platform_audio_open(int rate, AudioMixFn mix)
 
 void platform_audio_lock(int on) { (void)on; }
 void platform_audio_close(void) {}
+
+void platform_touch_profile(const char *game_id) { (void)game_id; }
+int platform_can_import(void) { return 0; }
+void platform_import_games(void) {}
+void platform_text_input(int on) { (void)on; }
+void platform_vibrate(int ms) { (void)ms; }
+void platform_fade_in(int ms) { (void)ms; }
+void platform_cursor_mode(int on) { (void)on; }
+int platform_paused(void) { return 0; }
+int platform_latch(void) { return 0; }
+int platform_hints(void) { return 0; }
+int platform_fullscreen(void) { return -1; }
+void platform_set_fullscreen(int on) { (void)on; }
+void platform_stick(float *x, float *y) { *x = *y = 0; }
+int platform_open_url(const char *url) { (void)url; return 0; }
+int platform_touch_wide(void) { return 0; }
+int platform_game_size(const char *id, int *w, int *h) { (void)id; (void)w; (void)h; return 0; }
+const char *platform_locale(void)
+{
+    const char *env = getenv("BT_LOCALE");
+    return env && *env ? env : "en-US";
+}

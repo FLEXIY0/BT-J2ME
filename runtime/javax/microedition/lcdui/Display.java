@@ -90,7 +90,21 @@ public class Display {
             old.hideNotifyInternal();
         d.layoutSoft();
         d.showNotifyInternal();
+        Native.textInput(wantsText(d));
         requestRepaint();
+    }
+
+    /* Нужна ли экранная клавиатура: TextBox или форма с полем ввода. */
+    private static boolean wantsText(Displayable d) {
+        if (d instanceof TextBox)
+            return true;
+        if (d instanceof Form) {
+            Form f = (Form) d;
+            for (int i = 0; i < f.items.size(); i++)
+                if (f.items.elementAt(i) instanceof TextField)
+                    return true;
+        }
+        return false;
     }
 
     public void callSerially(Runnable r) {
@@ -104,7 +118,12 @@ public class Display {
     public int numColors() { return 1 << 16; }
     public int numAlphaLevels() { return 256; }
     public boolean flashBacklight(int duration) { return true; }
-    public boolean vibrate(int duration) { return true; }
+    public boolean vibrate(int duration) {
+        if (duration < 0)
+            throw new IllegalArgumentException();
+        Native.vibrate(Math.min(duration, 2000));
+        return true;
+    }
 
     public int getColor(int specifier) {
         switch (specifier) {

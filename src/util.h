@@ -5,7 +5,12 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#define BT_LOG(...)  __android_log_print(ANDROID_LOG_INFO, "bt-j2me", __VA_ARGS__)
+#else
 #define BT_LOG(...)  fprintf(stderr, "bt-j2me: " __VA_ARGS__)
+#endif
 
 /* ZIP хранит числа в little-endian, class-файлы — в big-endian.
  * Читаем побайтно, чтобы код одинаково работал на x86, ARM и big-endian MIPS/PPC. */

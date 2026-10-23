@@ -3,9 +3,9 @@
 #include "jar.h"
 #include "manifest.h"
 #include "png.h"
+#include "compat.h"
 #include "util.h"
 
-#include <dirent.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,7 +30,7 @@ static Image load_png_mem(const uint8_t *buf, size_t len)
 static Image load_png_file(const char *path)
 {
     Image img = { NULL, 0, 0 };
-    FILE *f = fopen(path, "rb");
+    FILE *f = bt_fopen(path, "rb");
     uint8_t *buf;
     long len;
 
@@ -92,19 +92,19 @@ static int by_name(const void *a, const void *b)
 
 int library_scan(Library *lib, const char *dir)
 {
-    DIR *d;
-    struct dirent *de;
+    BtDir *d;
+    const char *name;
     int cap = 0;
 
     memset(lib, 0, sizeof(*lib));
     copy_str(lib->dir, sizeof(lib->dir), dir);
-    if (!(d = opendir(dir)))
+    if (!(d = bt_dir_open(dir)))
         return -1;
-    while ((de = readdir(d)) != NULL) {
-        size_t n = strlen(de->d_name);
+    while ((name = bt_dir_next(d)) != NULL) {
+        size_t n = strlen(name);
         Game *g;
 
-        if (n < 5 || strcasecmp(de->d_name + n - 4, ".jar") != 0 || n - 4 >= sizeof(g->base))
+        if (n < 5 || strcasecmp(name + n - 4, ".jar") != 0 || n - 4 >= sizeof(g->base))
             continue;
         if (lib->count == cap) {
             Game *ng = realloc(lib->games, (size_t)(cap = cap ? cap * 2 : 16) * sizeof(Game));
@@ -114,12 +114,12 @@ int library_scan(Library *lib, const char *dir)
         }
         g = &lib->games[lib->count++];
         memset(g, 0, sizeof(*g));
-        snprintf(g->path, sizeof(g->path), "%s/%s", dir, de->d_name);
-        memcpy(g->base, de->d_name, n - 4);
+        snprintf(g->path, sizeof(g->path), "%s/%s", dir, name);
+        memcpy(g->base, name, n - 4);
         g->base[n - 4] = '\0';
         read_game(g);
     }
-    closedir(d);
+    bt_dir_close(d);
     if (lib->count)
         qsort(lib->games, (size_t)lib->count, sizeof(Game), by_name);
     return 0;
@@ -239,6 +239,13 @@ void library_load_cover(const Library *lib, Game *g, int w, int h)
     src = load_png_file(path);
     if (!src.px) {
         snprintf(path, sizeof(path), "%s/covers/%s.png", lib->dir, g->base);
+        src = load_png_file(path);
+    }
+    if (!src.px) {
+        /* своей обложки нет — заставка «нажмите, чтобы играть», снятая при первом запуске */
+        char data[800];
+        bt_data_dir(data, sizeof(data));
+        snprintf(path, sizeof(path), "%s/shots/%s/title.png", data, g->base);
         src = load_png_file(path);
     }
     image_free(&g->cover);

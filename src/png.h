@@ -9,4 +9,7 @@
 /* Возвращает пиксели 0xAARRGGBB (освобождать free()) или NULL. */
 uint32_t *png_decode(const uint8_t *buf, size_t len, int *w, int *h);
 
+/* Кодирует 0xAARRGGBB в PNG (RGB, 8 бит; альфа отбрасывается). Буфер — free(), NULL при ошибке. */
+uint8_t *png_encode(const uint32_t *px, int w, int h, size_t *len);
+
 #endif

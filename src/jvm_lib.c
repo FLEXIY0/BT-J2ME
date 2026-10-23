@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
+#include <time.h>
 
 #define THIS (args[0].l)
 
@@ -156,6 +157,13 @@ static int class_init0(Thread *t, Value *args, Value *ret)
     return NATIVE_TAILCALL;
 }
 
+static ResourceFilter res_filter;
+
+void jvm_set_resource_filter(ResourceFilter f)
+{
+    res_filter = f;
+}
+
 /* byte[] getResource0(String name): ресурс из JAR игры (или библиотеки) */
 static int class_getResource0(Thread *t, Value *args, Value *ret)
 {
@@ -180,6 +188,8 @@ static int class_getResource0(Thread *t, Value *args, Value *ret)
     }
     if (app && (e = jar_find(app, path)) != NULL)
         data = jar_read(app, e, &len);
+    if (data && res_filter)
+        data = res_filter(path, data, &len);
     if (!data) {
         ret->l = NULL;
         return NATIVE_OK;
@@ -192,6 +202,19 @@ static int class_getResource0(Thread *t, Value *args, Value *ret)
 }
 
 /* ---------- java.lang.System / Runtime ---------- */
+
+/* Смещение местного времени от UTC (с летним временем, если оно сейчас действует). */
+static int tz_localOffset(Thread *t, Value *args, Value *ret)
+{
+    time_t now = time(NULL);
+    struct tm g = *gmtime(&now);
+
+    (void)t;
+    (void)args;
+    g.tm_isdst = localtime(&now)->tm_isdst;   /* mktime читает «UTC» как местное — разница и есть смещение */
+    ret->i = (int32_t)difftime(now, mktime(&g)) * 1000;
+    return NATIVE_OK;
+}
 
 static int sys_currentTimeMillis(Thread *t, Value *args, Value *ret)
 {
@@ -480,6 +503,7 @@ const NativeDef jvm_lib_natives[] = {
     { "java/lang/Class", "init0", "(Ljava/lang/Object;)V", class_init0 },
     { "java/lang/Class", "getResource0", "(Ljava/lang/String;)[B", class_getResource0 },
     { "java/lang/System", "currentTimeMillis", "()J", sys_currentTimeMillis },
+    { "java/util/TimeZone", "localOffset0", "()I", tz_localOffset },
     { "java/lang/System", "arraycopy", "(Ljava/lang/Object;ILjava/lang/Object;II)V", sys_arraycopy },
     { "java/lang/System", "identityHashCode", "(Ljava/lang/Object;)I", sys_identityHashCode },
     { "java/lang/Runtime", "freeMemory", "()J", rt_freeMemory },

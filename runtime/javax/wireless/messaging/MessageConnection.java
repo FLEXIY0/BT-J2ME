@@ -3,7 +3,8 @@ package javax.wireless.messaging;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 
-/* SMS не отправляются: Connector.open("sms://...") бросает ConnectionNotFoundException. */
+/* Connector.open("sms://...") даёт btvm.SmsConnection: сообщение никуда не уходит, но игра
+ * считает его отправленным — так проходят покупки за SMS. */
 public interface MessageConnection extends javax.microedition.io.Connection {
     String TEXT_MESSAGE = "text", BINARY_MESSAGE = "binary", MULTIPART_MESSAGE = "multipart";
 

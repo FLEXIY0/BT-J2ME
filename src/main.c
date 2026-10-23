@@ -1,4 +1,10 @@
 #include "audio.h"
+#ifdef __ANDROID__
+#include <SDL_system.h>
+#elif defined(_WIN32)
+#include <SDL_filesystem.h>
+#include <SDL_stdinc.h>
+#endif
 #include "classfile.h"
 #include "jar.h"
 #include "jvm.h"
@@ -7,13 +13,16 @@
 #include "rt.h"
 #include "manifest.h"
 #include "platform.h"
+#include "compat.h"
 #include "util.h"
 
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
-#define BT_VERSION "0.1.0-dev"
+#ifndef BT_VERSION
+#define BT_VERSION "0.1.0-dev"   /* в CI подставляется номер сборки: make VERSION=0.1.42 */
+#endif
 
 /* Минималистичная палитра: тёмный фон, один акцентный цвет. */
 #define COL_BG     0xFF101214u
@@ -38,7 +47,8 @@ static void usage(void)
         "  --sharp       только целое масштабирование\n"
         "  --gpu         рисовать через видеокарту (OpenGL); по умолчанию — программно,\n"
         "                это легче по памяти и надёжнее на старых ПК\n"
-        "  --mute        без звука\n\n"
+        "  --mute        без звука\n"
+        "  --touch       сенсорные кнопки поверх игры, как на Android (мышь — палец)\n\n"
         "BT_AUDIO_DUMP=файл.wav — записывать весь звук игры в файл.\n");
 }
 
@@ -204,7 +214,10 @@ static int parse_opts(int argc, char **argv, int start, PlatformConfig *cfg)
             cfg->software = 1;
         } else if (strcmp(argv[i], "--gpu") == 0) {
             cfg->software = 0;
+        } else if (strcmp(argv[i], "--touch") == 0) {
+            cfg->touch = 1;
         } else if (strcmp(argv[i], "--mute") == 0) {
+            cfg->mute = 1;
             audio_set_master(0);
         } else {
             BT_LOG("неизвестная опция: %s\n", argv[i]);
@@ -233,7 +246,7 @@ static int cmd_jvm_run(const char *jar, const char *cls)
 
 static int cmd_dump_rt(const char *path)
 {
-    FILE *f = fopen(path, "wb");
+    FILE *f = bt_fopen(path, "wb");
 
     if (!f || fwrite(bt_rt_jar, 1, bt_rt_jar_len, f) != bt_rt_jar_len) {
         BT_LOG("не удалось записать %s\n", path);
@@ -247,27 +260,62 @@ static int cmd_dump_rt(const char *path)
 
 static void default_games_dir(char *out, size_t cap)
 {
-    const char *env = getenv("BT_J2ME_GAMES"), *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
+    const char *env = getenv("BT_J2ME_GAMES"), *xdg = getenv("XDG_DATA_HOME");
 
     if (env && *env)
         snprintf(out, cap, "%s", env);
     else if (xdg && *xdg)
         snprintf(out, cap, "%s/bt-j2me/games", xdg);
     else
-        snprintf(out, cap, "%s/.local/share/bt-j2me/games", home ? home : ".");
+#ifdef __ANDROID__
+    {
+        /* Android/data/ru.flexiy0.btj2me/files/games: сюда же копирует импорт из MainActivity */
+        const char *ext = SDL_AndroidGetExternalStoragePath();
+        snprintf(out, cap, "%s/games", ext ? ext : bt_home());
+        bt_mkdir(out);
+    }
+#elif defined(_WIN32)
+    {
+        /* на Windows — папка games рядом с bt-j2me.exe, откуда бы его ни запустили
+         * (при перетаскивании JAR на exe текущая папка — чужая) */
+        char *base = SDL_GetBasePath();
+        snprintf(out, cap, "%sgames", base ? base : "");
+        SDL_free(base);
+    }
+#else
+        snprintf(out, cap, "%s/.local/share/bt-j2me/games", bt_home());
+#endif
 }
 
 static int is_dir(const char *path)
 {
-    struct stat st;
+    return bt_is_dir(path);
+}
 
-    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+/* Существующий .jar или .jad. */
+static int is_game_file(const char *path)
+{
+    size_t n = strlen(path);
+    FILE *f;
+
+    if (n < 5 || path[n - 4] != '.' || (strcmp(path + n - 3, "jar") && strcmp(path + n - 3, "jad") &&
+                                         strcmp(path + n - 3, "JAR") && strcmp(path + n - 3, "JAD")))
+        return 0;
+    if (!(f = bt_fopen(path, "rb")))
+        return 0;
+    fclose(f);
+    return 1;
 }
 
 int main(int argc, char **argv)
 {
-    PlatformConfig cfg = { 240, 320, 1, SCALE_AUTO, 1, "BT-J2ME" };
+    PlatformConfig cfg = { 240, 320, 1, SCALE_AUTO, 1, "BT-J2ME", 0, 0 };
     char dir[1024];
+
+#ifdef __ANDROID__
+    cfg.software = 0;   /* на телефоне рисует GPU (OpenGL ES): кнопки с прозрачностью — без нагрузки на CPU */
+    cfg.touch = 1;
+#endif
 
     if (argc >= 2 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)) {
         usage();
@@ -288,6 +336,15 @@ int main(int argc, char **argv)
     if (argc >= 2 && strcmp(argv[1], "--version") == 0) {
         puts("BT-J2ME " BT_VERSION);
         return 0;
+    }
+    if (argc >= 2 && is_game_file(argv[1])) {
+        /* JAR перетащили на bt-j2me.exe (или «Открыть с помощью»): кладём в папку игр
+         * и открываем полку прямо на нём */
+        int i;
+        default_games_dir(dir, sizeof(dir));
+        for (i = 1; i < argc && is_game_file(argv[i]); i++)
+            launcher_import(dir, argv[i]);
+        return parse_opts(argc, argv, i, &cfg) ? 2 : launcher_run(dir, &cfg);
     }
     if (argc < 2 || argv[1][0] == '-' || is_dir(argv[1])) {
         int first_opt = argc >= 2 && argv[1][0] != '-' ? 2 : 1;

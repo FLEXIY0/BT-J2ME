@@ -5,33 +5,47 @@
 #include "audio.h"
 #include "gfx.h"
 #include "jvm.h"
+#include "classfile.h"
+#include "jar.h"
 #include "manifest.h"
 #include "png.h"
 #include "rt.h"
+#include "compat.h"
 #include "util.h"
 
-#include <dirent.h>
 #include <errno.h>
 #include <math.h>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 
 /* ---------- состояние запуска ---------- */
 
 #define EVQ_LEN 64
 #define KEY_SLOTS 160   /* коды клавиш MIDP от -16 до 143 */
 #define MIN_PRESS_MS 100
+#define LATCH_MS     450   /* «залипание стрелок»: столько направление ещё держится после отпускания */
 
 typedef struct {
-    int type, a, b;
+    int      type, a, b;
+    uint32_t t;         /* когда поставлено — для BT_PERF */
 } MEvent;
 
 static struct {
     int       w, h;
     Manifest  mf, jad;
     int       have_mf, have_jad;
+    long      jar_size;     /* MIDlet-Jar-Size, если JAD нет */
+    int       perf;         /* BT_PERF: задержки ввода и подвисания — в журнал */
+    int       wide, ow, oh;     /* широкоэкранный режим: исходный размер игры */
+    char      shots[1100];      /* папка скриншотов игры */
+    uint32_t  t_start;
+    int       title_done;       /* снимок «нажмите, чтобы играть» уже есть */
     char      rms_dir[1024];
     MEvent    q[EVQ_LEN];
     int       q_head, q_len;
@@ -57,14 +71,27 @@ static void evq_push(int type, int a, int b)
     e->type = type;
     e->a = a;
     e->b = b;
+    e->t = jvm_now();
 }
 
 /* Игры часто опрашивают клавиши раз в кадр: слишком короткое нажатие они не заметят.
  * На телефоне кнопку держали минимум 50–100 мс, поэтому отпускание придерживаем. */
+static int is_dir(int key)
+{
+    return (key <= KEY_UP && key >= KEY_RIGHT) || key == '2' || key == '4' || key == '6' || key == '8';
+}
+
 static void key_down(int key, int printable)
 {
-    int k = key + 16;
+    int k = key + 16, d;
 
+    if (is_dir(key) && platform_latch())    /* новое направление сменяет придержанное старое */
+        for (d = 0; d < KEY_SLOTS; d++)
+            if (d != k && M.release_at[d] && is_dir(d - 16)) {
+                M.release_at[d] = 0;
+                M.pressed_at[d] = 0;
+                evq_push(MEV_KEY_UP, d - 16, 0);
+            }
     if (k >= 0 && k < KEY_SLOTS) {
         if (M.release_at[k]) {          /* нажали снова, пока ждали отпускания */
             evq_push(MEV_KEY_UP, key, 0);
@@ -80,6 +107,12 @@ static void key_up(int key)
     int k = key + 16;
     uint32_t now = jvm_now();
 
+    if (k >= 0 && k < KEY_SLOTS && M.pressed_at[k] && is_dir(key) && platform_latch()) {
+        /* игры вроде «Кошек-мышек» поворачивают, только пока стрелка зажата, а до перекрёстка
+         * ещё доехать — короткое нажатие держим дольше */
+        M.release_at[k] = now + LATCH_MS;
+        return;
+    }
     if (k >= 0 && k < KEY_SLOTS && M.pressed_at[k] && now - M.pressed_at[k] < MIN_PRESS_MS) {
         M.release_at[k] = M.pressed_at[k] + MIN_PRESS_MS;
         return;
@@ -481,6 +514,83 @@ static int g_rgb0(Thread *t, Value *a, Value *r)
     return NATIVE_OK;
 }
 
+/* ---------- M3G: спрайты Sprite3D и фон (javax.microedition.m3g.Graphics3D) ---------- */
+
+static int m3g_fill0(Thread *t, Value *a, Value *r)
+{
+    G g;
+    int x = a[1].i, y = a[2].i, w = a[3].i, h = a[4].i, j;
+
+    (void)t;
+    (void)r;
+    if (!a[0].l || !load_g(a[0].l, &g))
+        return NATIVE_OK;
+    g.color = (uint32_t)a[5].i | 0xFF000000u;
+    for (j = y < g.y0 ? g.y0 : y; j < y + h && j < g.y1; j++)
+        hspan(&g, x, x + w, j);
+    return NATIVE_OK;
+}
+
+static uint32_t m3g_blend(uint32_t d, uint32_t s, unsigned a, int mode)
+{
+    unsigned sh, out = 0;
+
+    switch (mode) {
+    case 64:    /* ALPHA */
+        return a >= 255 ? s | 0xFF000000u : gfx_mix(d, s, a);
+    case 65:    /* ALPHA_ADD */
+        for (sh = 0; sh < 24; sh += 8) {
+            unsigned c = ((d >> sh) & 255) + ((s >> sh) & 255) * a / 255;
+            out |= (c > 255 ? 255 : c) << sh;
+        }
+        return out | 0xFF000000u;
+    case 66: case 67:   /* MODULATE, MODULATE_X2 */
+        for (sh = 0; sh < 24; sh += 8) {
+            unsigned c = ((d >> sh) & 255) * ((s >> sh) & 255) / (mode == 67 ? 128 : 255);
+            out |= (c > 255 ? 255 : c) << sh;
+        }
+        return out | 0xFF000000u;
+    default:    /* REPLACE */
+        return s | 0xFF000000u;
+    }
+}
+
+/* sprite0(Graphics g, int[] px, iw, ih, cx, cy, cw, ch, dx, dy, dw, dh, blend, alpha, threshold):
+ * кусок картинки (cw/ch < 0 — зеркально) растягивается в прямоугольник ближайшим соседом. */
+static int m3g_sprite0(Thread *t, Value *a, Value *r)
+{
+    G g;
+    Object *arr = a[1].l;
+    int iw = a[2].i, ih = a[3].i, cx = a[4].i, cy = a[5].i, cw = a[6].i, ch = a[7].i;
+    int dx = a[8].i, dy = a[9].i, dw = a[10].i, dh = a[11].i, mode = a[12].i, alpha = a[13].i, thr = a[14].i;
+    int x, y, aw = cw < 0 ? -cw : cw, ah = ch < 0 ? -ch : ch;
+    const uint32_t *s;
+
+    (void)r;
+    if (!arr)
+        return jvm_throw(t, "java/lang/NullPointerException", NULL);
+    if (!a[0].l || !load_g(a[0].l, &g) || dw <= 0 || dh <= 0 || !aw || !ah || (int64_t)iw * ih > arr->length)
+        return NATIVE_OK;
+    s = ARR_OF(arr, uint32_t);
+    for (y = dy < g.y0 ? g.y0 : dy; y < dy + dh && y < g.y1; y++) {
+        int v = (int)((int64_t)(y - dy) * ah / dh), sy = ch < 0 ? cy + ah - 1 - v : cy + v;
+        uint32_t *d = g.buf + (size_t)y * (size_t)g.bw;
+        for (x = dx < g.x0 ? g.x0 : dx; x < dx + dw && x < g.x1; x++) {
+            int u = (int)((int64_t)(x - dx) * aw / dw), sx = cw < 0 ? cx + aw - 1 - u : cx + u;
+            uint32_t p;
+            unsigned pa;
+            if (sx < 0 || sy < 0 || sx >= iw || sy >= ih)
+                continue;       /* за краем картинки — прозрачно */
+            p = s[sy * iw + sx];
+            pa = (p >> 24) * (unsigned)alpha / 255;
+            if ((int)pa < thr || (mode != 68 && !pa && mode != 66 && mode != 67))
+                continue;
+            d[x] = m3g_blend(d[x], p, pa, mode);
+        }
+    }
+    return NATIVE_OK;
+}
+
 static const Font *font_by_id(int id, int *fake_bold)
 {
     *fake_bold = 0;
@@ -651,6 +761,8 @@ static int n_pollEvent(Thread *t, Value *a, Value *r)
     e = &M.q[M.q_head];
     M.q_head = (M.q_head + 1) % EVQ_LEN;
     M.q_len--;
+    if (M.perf && (e->type == MEV_KEY_DOWN || e->type == MEV_PTR_DOWN))
+        fprintf(stderr, "perf: нажатие %d дошло до игры за %u мс\n", e->a, (unsigned)(jvm_now() - e->t));
     ARR_OF(out, int32_t)[0] = e->a;
     ARR_OF(out, int32_t)[1] = e->b;
     ARR_OF(out, int32_t)[2] = 0;
@@ -739,6 +851,11 @@ static int n_getAppProperty(Thread *t, Value *a, Value *r)
     v = M.have_jad ? manifest_get(&M.jad, key) : NULL;
     if (!v && M.have_mf)
         v = manifest_get(&M.mf, key);
+    if (!v && M.jar_size > 0 && !strcmp(key, "MIDlet-Jar-Size")) {
+        /* без JAD его нет, а игры с платными SMS без него считают себя «не настроенными» */
+        snprintf(key, sizeof(key), "%ld", M.jar_size);
+        v = key;
+    }
     r->l = v ? jvm_new_string(t, v) : NULL;
     return v && !r->l ? NATIVE_EXCEPTION : NATIVE_OK;
 }
@@ -779,10 +896,10 @@ static void mkdirs(const char *path)
     for (p = buf + 1; *p; p++)
         if (*p == '/') {
             *p = '\0';
-            mkdir(buf, 0755);
+            bt_mkdir(buf);
             *p = '/';
         }
-    mkdir(buf, 0755);
+    bt_mkdir(buf);
 }
 
 static void rms_path(Object *name, char *out, size_t cap)
@@ -804,7 +921,7 @@ static int n_rmsLoad(Thread *t, Value *a, Value *r)
 
     rms_path(a[0].l, path, sizeof(path));
     r->l = NULL;
-    if (!(f = fopen(path, "rb")))
+    if (!(f = bt_fopen(path, "rb")))
         return NATIVE_OK;
     if (fseek(f, 0, SEEK_END) == 0 && (len = ftell(f)) >= 0 && fseek(f, 0, SEEK_SET) == 0) {
         r->l = jvm_new_array(t, 'B', NULL, (int)len);
@@ -826,13 +943,13 @@ static int n_rmsSave(Thread *t, Value *a, Value *r)
     rms_path(a[0].l, path, sizeof(path));
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
     r->i = 0;
-    if (!data || !(f = fopen(tmp, "wb")))
+    if (!data || !(f = bt_fopen(tmp, "wb")))
         return NATIVE_OK;
     /* через временный файл: выключение посреди записи не испортит сохранение */
     r->i = fwrite(ARR_DATA(data), 1, (size_t)data->length, f) == (size_t)data->length;
     r->i &= fclose(f) == 0;
     if (r->i)
-        r->i = rename(tmp, path) == 0;
+        r->i = bt_replace(tmp, path);
     return NATIVE_OK;
 }
 
@@ -842,33 +959,33 @@ static int n_rmsDelete(Thread *t, Value *a, Value *r)
 
     (void)t;
     rms_path(a[0].l, path, sizeof(path));
-    r->i = remove(path) == 0;
+    r->i = bt_remove(path);
     return NATIVE_OK;
 }
 
 static int n_rmsList(Thread *t, Value *a, Value *r)
 {
-    DIR *d = opendir(M.rms_dir);
-    struct dirent *de;
+    BtDir *d = bt_dir_open(M.rms_dir);
+    const char *name;
     char names[64][128];
     int n = 0, i;
     Class *sc;
 
     (void)a;
-    while (d && (de = readdir(d)) != NULL && n < 64) {
-        size_t len = strlen(de->d_name), k;
-        if (len < 5 || strcmp(de->d_name + len - 4, ".rms") || (len - 4) % 2 || (len - 4) / 2 >= sizeof(names[0]))
+    while (d && (name = bt_dir_next(d)) != NULL && n < 64) {
+        size_t len = strlen(name), k;
+        if (len < 5 || strcmp(name + len - 4, ".rms") || (len - 4) % 2 || (len - 4) / 2 >= sizeof(names[0]))
             continue;
         for (k = 0; k < (len - 4) / 2; k++) {
             unsigned v;
-            sscanf(de->d_name + k * 2, "%2x", &v);
+            sscanf(name + k * 2, "%2x", &v);
             names[n][k] = (char)v;
         }
         names[n][k] = '\0';
         n++;
     }
     if (d)
-        closedir(d);
+        bt_dir_close(d);
     sc = jvm_class(t, "java/lang/String");
     if (!sc || !(r->l = jvm_new_array(t, 'L', sc, n)))
         return NATIVE_EXCEPTION;
@@ -914,6 +1031,41 @@ static int s_tone(Thread *t, Value *a, Value *r)
     return NATIVE_OK;
 }
 
+static int n_textInput(Thread *t, Value *a, Value *r)
+{
+    (void)t;
+    (void)r;
+    platform_text_input(a[0].i);
+    return NATIVE_OK;
+}
+
+static int n_vibrate(Thread *t, Value *a, Value *r)
+{
+    (void)t;
+    (void)r;
+    platform_vibrate(a[0].i);
+    return NATIVE_OK;
+}
+
+static int n_openUrl(Thread *t, Value *a, Value *r)
+{
+    char url[1024];
+
+    (void)t;
+    r->i = 0;
+    if (a[0].l && jvm_string_utf8(a[0].l, url, sizeof(url)) > 0)
+        r->i = platform_open_url(url);
+    return NATIVE_OK;
+}
+
+/* Язык системы: игры с несколькими языками сами выберут русский. */
+static int n_locale(Thread *t, Value *a, Value *r)
+{
+    (void)a;
+    r->l = jvm_new_string(t, platform_locale());
+    return NATIVE_OK;
+}
+
 static const NativeDef midp_natives[] = {
     { "javax/microedition/lcdui/Graphics", "fill0", NULL, g_fill0 },
     { "javax/microedition/lcdui/Graphics", "line0", NULL, g_line0 },
@@ -924,12 +1076,15 @@ static const NativeDef midp_natives[] = {
     { "javax/microedition/lcdui/Graphics", "rgb0", NULL, g_rgb0 },
     { "javax/microedition/lcdui/Graphics", "text0", NULL, g_text0 },
     { "javax/microedition/lcdui/Graphics", "copy0", NULL, g_copy0 },
+    { "javax/microedition/m3g/Graphics3D", "fill0", NULL, m3g_fill0 },
+    { "javax/microedition/m3g/Graphics3D", "sprite0", NULL, m3g_sprite0 },
     { "javax/microedition/lcdui/Font", "charWidth0", NULL, f_charWidth0 },
     { "javax/microedition/lcdui/Font", "stringWidth0", NULL, f_stringWidth0 },
     { "btvm/Native", "pollEvent", NULL, n_pollEvent },
     { "btvm/Native", "waitEvent", NULL, n_waitEvent },
     { "btvm/Native", "wake", NULL, n_wake },
     { "btvm/Native", "flush", NULL, n_flush },
+    { "btvm/Native", "locale", NULL, n_locale },
     { "btvm/Native", "screenWidth", NULL, n_screenWidth },
     { "btvm/Native", "screenHeight", NULL, n_screenHeight },
     { "btvm/Native", "exit", NULL, n_exit },
@@ -939,6 +1094,9 @@ static const NativeDef midp_natives[] = {
     { "btvm/Native", "rmsSave", NULL, n_rmsSave },
     { "btvm/Native", "rmsDelete", NULL, n_rmsDelete },
     { "btvm/Native", "rmsList", NULL, n_rmsList },
+    { "btvm/Native", "textInput", NULL, n_textInput },
+    { "btvm/Native", "vibrate", NULL, n_vibrate },
+    { "btvm/Native", "openUrl", NULL, n_openUrl },
     { "btvm/Native", "sndCreate", NULL, s_create },
     { "btvm/Native", "sndCreateFreq", NULL, s_createFreq },
     { "btvm/Native", "sndFree", NULL, s_free },
@@ -957,7 +1115,7 @@ static const NativeDef midp_natives[] = {
 /* ---------- запуск ---------- */
 
 /* Размер экрана из манифеста: «Nokia-MIDlet-Original-Display-Size: 176,208» и похожие. */
-static void screen_size_from_manifest(void)
+static int screen_size_from_manifest(void)
 {
     static const char *keys[] = { "Nokia-MIDlet-Original-Display-Size", "MIDlet-Screen-Size", "Display-Size" };
     size_t i;
@@ -970,9 +1128,218 @@ static void screen_size_from_manifest(void)
         if (v && sscanf(v, "%d%*[ ,xX*]%d", &w, &h) == 2 && w >= 96 && h >= 64 && w <= 640 && h <= 640) {
             M.w = w;
             M.h = h;
-            return;
+            return 1;
         }
     }
+    return 0;
+}
+
+/* Метод «()I», который просто возвращает число (bipush/sipush/ldc + ireturn), — его значение. */
+static int const_int_method(const ClassFile *cf, const char *name, int *out)
+{
+    int i;
+
+    for (i = 0; i < cf->method_count; i++) {
+        const Member *m = &cf->methods[i];
+        char n[32], d[8];
+        const uint8_t *c = m->code;
+        if (!c || classfile_utf8(cf, m->name_idx, n, sizeof(n)) || strcmp(n, name) ||
+            classfile_utf8(cf, m->desc_idx, d, sizeof(d)) || strcmp(d, "()I"))
+            continue;
+        if (m->code_len == 3 && c[0] == 0x10 && c[2] == 0xAC)
+            *out = (int8_t)c[1];
+        else if (m->code_len == 4 && c[0] == 0x11 && c[3] == 0xAC)
+            *out = (int16_t)(c[1] << 8 | c[2]);
+        else if (m->code_len == 3 && c[0] == 0x12 && c[2] == 0xAC && c[1] < cf->cp_count && cf->cp[c[1]].tag == CP_INTEGER)
+            *out = cf->cp[c[1]].u.i;
+        else
+            return 0;
+        return 1;
+    }
+    return 0;
+}
+
+/* Игра, собранная под один телефон, часто зашивает размер экрана прямо в свой Canvas:
+ * getWidth() { return 240; } getHeight() { return 400; } (The Sims 3 от EA и др.).
+ * Тогда отдаём ей ровно такой экран, иначе низ или край окажутся за кадром. */
+static int screen_size_from_classes(void)
+{
+    const Jar *jar = jvm_app_jar();
+    size_t i;
+    int found = 0;
+
+    for (i = 0; jar && i < jar->count && !found; i++) {
+        const char *name = jar->entries[i].name;
+        size_t nl = strlen(name), len, k;
+        uint8_t *buf;
+        ClassFile cf;
+        char err[64], super[64];
+        int w, h;
+
+        if (nl < 7 || strcmp(name + nl - 6, ".class") || jar->entries[i].usize > (1u << 20))
+            continue;
+        if (!(buf = jar_read(jar, &jar->entries[i], &len)))
+            continue;
+        for (k = 0; k + 9 <= len && memcmp(buf + k, "getHeight", 9); k++)
+            ;
+        if (k + 9 <= len && classfile_parse(&cf, buf, len, err, sizeof(err)) == 0) {
+            if (cf.super_class && classfile_class_name(&cf, cf.super_class, super, sizeof(super)) == 0 &&
+                (!strcmp(super, "javax/microedition/lcdui/Canvas") ||
+                 !strcmp(super, "javax/microedition/lcdui/game/GameCanvas")) &&
+                const_int_method(&cf, "getWidth", &w) && const_int_method(&cf, "getHeight", &h) &&
+                w >= 96 && h >= 64 && w <= 640 && h <= 640) {
+                M.w = w;
+                M.h = h;
+                found = 1;
+            }
+            classfile_free(&cf);
+        }
+        free(buf);
+    }
+    return found;
+}
+
+/* Широкоэкранный режим: экран игры под форму телефона, короткая сторона — как у игры.
+ * В портрете игре достаётся ~68% высоты (снизу кнопки), в альбоме — весь экран. */
+static void wide_size(void)
+{
+    int dw, dh, s = M.w < M.h ? M.w : M.h, w, h;
+
+    platform_display_size(&dw, &dh);
+    if (dw <= 0 || dh <= 0)
+        return;
+    if (dh > dw) {
+        w = s;
+        h = (int)((float)s * (float)dh * 0.68f / (float)dw);
+    } else {
+        h = s;
+        w = (int)((float)s * (float)dw / (float)dh);
+    }
+    M.ow = M.w;
+    M.oh = M.h;
+    M.w = (w > 640 ? 640 : w) & ~1;
+    M.h = (h > 640 ? 640 : h) & ~1;
+    M.wide = 1;
+}
+
+/* Многие игры берут размер экрана из своего конфига (scr_width=240 у Dynamic Pixels и др.):
+ * в широкоэкранном режиме подменяем такие строки на новый размер. */
+static int wide_key(const char *k, int n, const char *what)
+{
+    char low[64];
+    int i;
+
+    if (n <= 0 || n >= (int)sizeof(low))
+        return 0;
+    for (i = 0; i < n; i++)
+        low[i] = (char)(k[i] >= 'A' && k[i] <= 'Z' ? k[i] + 32 : k[i]);
+    low[n] = '\0';
+    if (!strstr(low, "scr") && !strstr(low, "screen") && !strstr(low, "display"))
+        return 0;
+    return strstr(low, what) != NULL || (low[n - 1] == what[0] && (low[n - 2] == '_' || low[n - 2] == '-'));
+}
+
+static uint8_t *wide_filter(const char *path, uint8_t *data, size_t *len)
+{
+    char *out;
+    size_t i = 0, o = 0;
+    int changed = 0;
+
+    (void)path;
+    if (!M.wide || *len > 16384 || memchr(data, 0, *len) || !(out = malloc(*len + 64)))
+        return data;
+    while (i < *len) {
+        size_t eol = i, eq, v0, v1;
+        while (eol < *len && data[eol] != '\n')
+            eol++;
+        for (eq = i; eq < eol && data[eq] != '=' && data[eq] != ':'; eq++)
+            ;
+        v0 = eq + 1;
+        while (v0 < eol && data[v0] == ' ')
+            v0++;
+        for (v1 = v0; v1 < eol && data[v1] >= '0' && data[v1] <= '9'; v1++)
+            ;
+        if (eq < eol && v1 > v0 && v1 - v0 < 5) {
+            size_t ke = eq;
+            int val = atoi((const char *)data + v0), nv = -1;
+            while (ke > i && data[ke - 1] == ' ')
+                ke--;
+            if (val == M.ow && wide_key((const char *)data + i, (int)(ke - i), "width"))
+                nv = M.w;
+            else if (val == M.oh && wide_key((const char *)data + i, (int)(ke - i), "height"))
+                nv = M.h;
+            if (nv >= 0 && o + (v0 - i) + 8 < *len + 64) {
+                memcpy(out + o, data + i, v0 - i);
+                o += v0 - i;
+                o += (size_t)sprintf(out + o, "%d", nv);
+                i = v1;
+                changed = 1;
+            }
+        }
+        while (i <= eol && i < *len)
+            out[o++] = (char)data[i++];
+    }
+    if (!changed) {
+        free(out);
+        return data;
+    }
+    free(data);
+    *len = o;
+    return (uint8_t *)out;
+}
+
+/* ---------- скриншоты: из них в лаунчере делают обложку ---------- */
+
+static void shots_dir_for(const char *save_id)
+{
+    char base[800], id[256];
+    size_t i;
+
+    snprintf(id, sizeof(id), "%s", save_id);
+    for (i = 0; id[i]; i++)
+        if (id[i] == '/' || id[i] == '\\')
+            id[i] = '_';
+    bt_data_dir(base, sizeof(base));
+    snprintf(M.shots, sizeof(M.shots), "%s/shots/%s", base, id);
+}
+
+/* Текущий кадр игры — в PNG. name NULL — снимок с датой. */
+static int save_shot(const char *name)
+{
+    Image *scr = platform_screen();
+    char path[1300], stamp[64];
+    uint8_t *png;
+    size_t len;
+    FILE *f;
+    int ok = 0;
+
+    if (!name) {
+        time_t now = time(NULL);
+        strftime(stamp, sizeof(stamp), "shot-%Y%m%d-%H%M%S.png", localtime(&now));
+        name = stamp;
+    }
+    bt_mkdirs(M.shots);
+    snprintf(path, sizeof(path), "%s/%s", M.shots, name);
+    if (!scr->px || !(png = png_encode(scr->px, scr->w, scr->h, &len)))
+        return 0;
+    if ((f = bt_fopen(path, "wb")) != NULL) {
+        ok = fwrite(png, 1, len, f) == len;
+        ok &= fclose(f) == 0;
+    }
+    free(png);
+    if (ok)
+        BT_LOG("снимок: %s\n", path);
+    return ok;
+}
+
+/* Первое нажатие игрока (не раньше чем через 2,5 с) почти всегда приходится на заставку
+ * «нажмите, чтобы играть» — её и запоминаем как обложку по умолчанию. */
+static void maybe_title_shot(void)
+{
+    if (M.title_done || M.frames < 5 || jvm_now() - M.t_start < 2500)
+        return;
+    M.title_done = 1;
+    save_shot("title.png");
 }
 
 /* <игра>.jad рядом с JAR: в нём бывают свойства, без которых игра не стартует. */
@@ -988,7 +1355,7 @@ static void load_jad(const char *jar)
         return;
     memcpy(path, jar, n - 4);
     strcpy(path + n - 4, jar[n - 1] == 'R' ? ".JAD" : ".jad");
-    if (!(f = fopen(path, "rb")))
+    if (!(f = bt_fopen(path, "rb")))
         return;
     if (fseek(f, 0, SEEK_END) == 0 && (len = ftell(f)) > 0 && len < (1 << 20) && fseek(f, 0, SEEK_SET) == 0 &&
         (buf = malloc((size_t)len)) != NULL) {
@@ -999,9 +1366,9 @@ static void load_jad(const char *jar)
     fclose(f);
 }
 
-static void rms_dir_for(const char *save_id)
+static void rms_dir_path(const char *save_id, char *out, size_t cap)
 {
-    const char *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
+    const char *xdg = getenv("XDG_DATA_HOME"), *app = bt_appdata();
     char id[256];
     size_t i;
 
@@ -1010,9 +1377,40 @@ static void rms_dir_for(const char *save_id)
         if (id[i] == '/' || id[i] == '\\')
             id[i] = '_';
     if (xdg && *xdg)
-        snprintf(M.rms_dir, sizeof(M.rms_dir), "%s/bt-j2me/rms/%s", xdg, id);
+        snprintf(out, cap, "%s/bt-j2me/rms/%s", xdg, id);
+    else if (app)
+        snprintf(out, cap, "%s/bt-j2me/rms/%s", app, id);
     else
-        snprintf(M.rms_dir, sizeof(M.rms_dir), "%s/.local/share/bt-j2me/rms/%s", home ? home : ".", id);
+        snprintf(out, cap, "%s/.local/share/bt-j2me/rms/%s", bt_home(), id);
+}
+
+static void rms_dir_for(const char *save_id)
+{
+    rms_dir_path(save_id, M.rms_dir, sizeof(M.rms_dir));
+}
+
+int midp_saves(const char *save_id, int erase)
+{
+    char dir[1024], names[64][208], path[1300];
+    const char *name;
+    BtDir *d;
+    int n = 0, i;
+
+    rms_dir_path(save_id, dir, sizeof(dir));
+    if (!(d = bt_dir_open(dir)))
+        return 0;
+    /* имена сперва собираем, удаляем потом: стирать прямо во время обхода папки нельзя */
+    while ((name = bt_dir_next(d)) != NULL && n < 64) {
+        size_t len = strlen(name);
+        if (len > 4 && len < sizeof(names[0]) && (!strcmp(name + len - 4, ".rms") || !strcmp(name + len - 4, ".tmp")))
+            snprintf(names[n++], sizeof(names[0]), "%s", name);
+    }
+    bt_dir_close(d);
+    for (i = 0; erase && i < n; i++) {
+        snprintf(path, sizeof(path), "%s/%.207s", dir, names[i]);
+        bt_remove(path);
+    }
+    return n;
 }
 
 MidpResult midp_run(const char *jar, const char *save_id, ScaleMode scale, char *err, size_t errlen)
@@ -1022,7 +1420,7 @@ MidpResult midp_run(const char *jar, const char *save_id, ScaleMode scale, char 
     char *text = NULL;
     size_t len;
     uint32_t sleep_ms, exit_deadline = 0;
-    int user_exit = 0, r;
+    int user_exit = 0, restart = 0, r;
     MidpResult result = MIDP_BACK;
 
     memset(&M, 0, sizeof(M));
@@ -1044,8 +1442,42 @@ MidpResult midp_run(const char *jar, const char *save_id, ScaleMode scale, char 
         goto out;
     }
     load_jad(jar);
-    screen_size_from_manifest();
+    {
+        FILE *jf = bt_fopen(jar, "rb");
+        M.jar_size = 0;
+        if (jf) {
+            if (fseek(jf, 0, SEEK_END) == 0)
+                M.jar_size = ftell(jf);
+            fclose(jf);
+        }
+    }
+    if (!screen_size_from_manifest())
+        screen_size_from_classes();
+    {
+        int ow, oh;
+        if (platform_game_size(save_id, &ow, &oh)) {      /* размер, выбранный в меню паузы */
+            M.w = ow;
+            M.h = oh;
+        }
+    }
     rms_dir_for(save_id);
+    shots_dir_for(save_id);
+    {
+        char tp[1200];
+        FILE *tf;
+        snprintf(tp, sizeof(tp), "%s/title.png", M.shots);
+        if ((tf = bt_fopen(tp, "rb")) != NULL) {
+            M.title_done = 1;
+            fclose(tf);
+        }
+    }
+    M.t_start = jvm_now();
+    M.perf = getenv("BT_PERF") != NULL;
+    platform_touch_profile(save_id);
+    if (platform_touch_wide()) {
+        wide_size();
+        jvm_set_resource_filter(wide_filter);
+    }
     platform_set_screen(M.w, M.h, scale);
     {
         Image *s = platform_screen();
@@ -1066,6 +1498,9 @@ MidpResult midp_run(const char *jar, const char *save_id, ScaleMode scale, char 
             case EV_QUIT:
                 result = MIDP_QUIT;
                 goto out;
+            case EV_RESTART:
+                restart = 1;
+                /* fall through */
             case EV_BACK:
                 /* вежливо: destroyApp() даём полторы секунды, потом закрываем сами */
                 if (!user_exit) {
@@ -1075,12 +1510,17 @@ MidpResult midp_run(const char *jar, const char *save_id, ScaleMode scale, char 
                 }
                 break;
             case EV_KEY_DOWN:
+                maybe_title_shot();
                 key_down(ev.key, ev.printable);
+                break;
+            case EV_SCREENSHOT:
+                save_shot(NULL);
                 break;
             case EV_KEY_UP:
                 key_up(ev.key);
                 break;
             case EV_POINTER_DOWN:
+                maybe_title_shot();
                 evq_push(MEV_PTR_DOWN, ev.x, ev.y);
                 break;
             case EV_POINTER_UP:
@@ -1096,13 +1536,22 @@ MidpResult midp_run(const char *jar, const char *save_id, ScaleMode scale, char 
                 break;
             }
         }
+        if (platform_paused()) {    /* меню паузы на ПК: машина стоит */
+            platform_sleep_ms(16);
+            continue;
+        }
         deliver_releases();
         audio_pump();
         if (M.q_len)
             jvm_wake_event_waiters();
         if (user_exit && (int32_t)(jvm_now() - exit_deadline) >= 0)
             break;
-        r = jvm_step(12, &sleep_ms);
+        {
+            uint32_t s0 = jvm_now();
+            r = jvm_step(12, &sleep_ms);
+            if (M.perf && jvm_now() - s0 > 60)
+                fprintf(stderr, "perf: шаг машины %u мс\n", (unsigned)(jvm_now() - s0));
+        }
         if (r < 0)
             break;
         if (r == 0)
@@ -1114,11 +1563,16 @@ MidpResult midp_run(const char *jar, const char *save_id, ScaleMode scale, char 
     }
 
 out:
+    platform_touch_profile(NULL);
+    platform_text_input(0);
     audio_reset();     /* до jvm_destroy: звуки игры больше никому не нужны */
     if (M.have_mf)
         manifest_free(&M.mf);
     if (M.have_jad)
         manifest_free(&M.jad);
+    jvm_set_resource_filter(NULL);
     jvm_destroy();
+    if (restart && result == MIDP_BACK)     /* сменили размер экрана — запускаем заново */
+        return midp_run(jar, save_id, scale, err, errlen);
     return result;
 }

@@ -1,0 +1,67 @@
+// BT-J2ME для Android: нативная часть — тот же C-код, что и на ПК (src/), плюс SDL2.
+// SDL2 подкладывает tools/build-android.sh: app/jni/SDL → исходники SDL2 (в git не хранятся).
+plugins {
+    id 'com.android.application'
+}
+
+// Версию и ключ подписи даёт CI (.github/workflows/build.yml); локально — 0.1 и отладочный ключ.
+def btVersion = System.getenv('BT_VERSION') ?: '0.1'
+def btVersionCode = (System.getenv('BT_VERSION_CODE') ?: '1') as int
+def btKeystore = System.getenv('BT_KEYSTORE')
+
+android {
+    namespace 'ru.flexiy0.btj2me'
+    compileSdk 34
+    ndkVersion '23.2.8568313'   // r23c — последний NDK, что собирает под Android 4.1
+
+    defaultConfig {
+        applicationId 'ru.flexiy0.btj2me'
+        minSdk 16            // Android 4.1 Jelly Bean — ниже не пускает SDL2 (EGL/GLES2); 64-битные ABI сами от 5.0
+        targetSdk 34
+        versionCode btVersionCode
+        versionName btVersion
+        externalNativeBuild {
+            cmake {
+                abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
+                arguments "-DBT_VERSION=${btVersion}"
+            }
+        }
+    }
+
+    signingConfigs {
+        if (btKeystore) {
+            // постоянный ключ: обновления ставятся поверх старой версии, сохранения остаются
+            release {
+                storeFile file(btKeystore)
+                storePassword System.getenv('BT_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('BT_KEY_ALIAS') ?: 'bt-j2me'
+                keyPassword System.getenv('BT_KEY_PASSWORD') ?: System.getenv('BT_KEYSTORE_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            // без ключа из CI — отладочный: APK ставится «как есть», но обновить его поверх нельзя
+            signingConfig btKeystore ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path 'jni/CMakeLists.txt'
+        }
+    }
+
+    sourceSets {
+        main {
+            java.srcDirs += ['jni/SDL/android-project/app/src/main/java']
+        }
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false   // lint не нужен для сборки и тянет лишние зависимости
+    }
+}

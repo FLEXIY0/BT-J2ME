@@ -1,4 +1,5 @@
 #include "jar.h"
+#include "compat.h"
 #include "util.h"
 
 #include <stdlib.h>
@@ -11,7 +12,7 @@
 
 static uint8_t *read_file(const char *path, size_t *size)
 {
-    FILE *f = fopen(path, "rb");
+    FILE *f = bt_fopen(path, "rb");
     uint8_t *buf = NULL;
     long len;
 

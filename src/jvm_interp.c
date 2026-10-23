@@ -1200,8 +1200,15 @@ int jvm_step(uint32_t budget_ms, uint32_t *sleep_ms)
         vm->current = pick;
         pick->yield = 0;
         run(pick, QUANTUM);
-        if (vm->gc_requested)
+        if (vm->gc_requested) {
+            static int perf = -1;
+            uint32_t g0 = jvm_now();
             jvm_gc();
+            if (perf < 0)
+                perf = getenv("BT_PERF") != NULL;
+            if (perf)
+                fprintf(stderr, "perf: gc %u мс, живых %zu КБ\n", (unsigned)(jvm_now() - g0), vm->bytes / 1024);
+        }
         if (jvm_now() - start >= budget_ms)
             return 1;
     }

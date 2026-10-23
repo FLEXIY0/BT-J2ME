@@ -41,6 +41,12 @@ void gfx_disc(Image *dst, int cx, int cy, int r, float angle, int alpha);
 
 int  gfx_text(Image *dst, const Font *f, int x, int y, const char *utf8, uint32_t argb, int scale);
 int  gfx_text_width(const Font *f, const char *utf8, int scale);
+/* Значок кнопки геймпада, как на Xbox: A/B/X/Y — цветные кружки, остальные (LB, View,
+ * Start, L3…) — плашки с надписью. Высота f->h + 2; возвращает ширину. */
+int  gfx_pad_button(Image *dst, const Font *f, int x, int y, const char *name);
+/* Строка подсказок «кнопка — действие»: пары через \t, например "A\tиграть\tB\tназад".
+ * Имя в квадратных скобках ("[Esc]") — клавиша клавиатуры. dst == NULL — только ширина. */
+int  gfx_hints(Image *dst, const Font *f, int x, int y, const char *pairs, uint32_t text);
 
 static inline uint32_t gfx_mix(uint32_t d, uint32_t s, unsigned a)
 {

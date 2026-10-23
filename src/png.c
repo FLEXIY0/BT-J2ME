@@ -237,3 +237,76 @@ fail:
     free(px);
     return NULL;
 }
+
+/* ---------- запись (скриншоты игр) ---------- */
+
+static void put_be32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)(v >> 24);
+    p[1] = (uint8_t)(v >> 16);
+    p[2] = (uint8_t)(v >> 8);
+    p[3] = (uint8_t)v;
+}
+
+/* Чанк: длина, тип, данные, CRC по типу и данным. */
+static uint8_t *put_chunk(uint8_t *p, const char *type, const uint8_t *data, uint32_t n)
+{
+    uLong crc;
+
+    put_be32(p, n);
+    memcpy(p + 4, type, 4);
+    if (n)
+        memcpy(p + 8, data, n);
+    crc = crc32(0L, p + 4, n + 4);
+    put_be32(p + 8 + n, (uint32_t)crc);
+    return p + 12 + n;
+}
+
+uint8_t *png_encode(const uint32_t *px, int w, int h, size_t *len)
+{
+    static const uint8_t sig[8] = { 137, 'P', 'N', 'G', 13, 10, 26, 10 };
+    size_t raw_len = (size_t)h * ((size_t)w * 3 + 1);
+    uLongf zlen = compressBound((uLong)raw_len);
+    uint8_t *raw, *z, *out, *p, ihdr[13];
+    int x, y;
+
+    if (w <= 0 || h <= 0 || w > PNG_MAX_SIDE || h > PNG_MAX_SIDE)
+        return NULL;
+    raw = malloc(raw_len);
+    z = malloc(zlen);
+    out = malloc(zlen + 64);
+    if (!raw || !z || !out) {
+        free(raw);
+        free(z);
+        free(out);
+        return NULL;
+    }
+    for (y = 0, p = raw; y < h; y++) {
+        *p++ = 0;                           /* фильтр None */
+        for (x = 0; x < w; x++) {
+            uint32_t c = px[(size_t)y * (size_t)w + (size_t)x];
+            *p++ = (uint8_t)(c >> 16);
+            *p++ = (uint8_t)(c >> 8);
+            *p++ = (uint8_t)c;
+        }
+    }
+    if (compress2(z, &zlen, raw, (uLong)raw_len, 9) != Z_OK) {
+        free(raw);
+        free(z);
+        free(out);
+        return NULL;
+    }
+    put_be32(ihdr, (uint32_t)w);
+    put_be32(ihdr + 4, (uint32_t)h);
+    ihdr[8] = 8;        /* 8 бит */
+    ihdr[9] = 2;        /* RGB */
+    ihdr[10] = ihdr[11] = ihdr[12] = 0;
+    memcpy(out, sig, 8);
+    p = put_chunk(out + 8, "IHDR", ihdr, 13);
+    p = put_chunk(p, "IDAT", z, (uint32_t)zlen);
+    p = put_chunk(p, "IEND", NULL, 0);
+    *len = (size_t)(p - out);
+    free(raw);
+    free(z);
+    return out;
+}

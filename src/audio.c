@@ -1,6 +1,7 @@
 /* Звук BT-J2ME: микшер, MIDI-синтезатор и разбор звуковых форматов телефонов. */
 #include "audio.h"
 #include "platform.h"
+#include "compat.h"
 #include "util.h"
 
 #include <math.h>
@@ -264,6 +265,28 @@ static void drum_setup(Voice *v, int note)
         break;
     case 51: case 53: case 59:                          /* райд */
         v->filt = F_HIGH; v->lp_k = 100; dec = 400; amp = 0.35f;
+        break;
+    case 54: case 69: case 70: case 82:                 /* бубен, кабаса, маракасы, шейкер */
+        v->filt = F_HIGH; v->lp_k = 40; dec = note == 54 ? 90 : 30; amp = 0.4f;
+        break;
+    case 56:                                            /* коровий колокольчик */
+        f0 = 800; f1 = 780; dec = 160; amp = 0.55f;
+        break;
+    case 60: case 61:                                   /* бонги: высокий и низкий */
+        f0 = note == 60 ? 420 : 330; f1 = f0 * 0.85f; dec = 110; amp = 0.9f; sweep_ms = 40;
+        break;
+    case 62: case 63: case 64:                          /* конги: глухая, открытая, низкая */
+        f0 = note == 62 ? 300 : note == 63 ? 260 : 200;
+        f1 = f0 * 0.8f; dec = note == 62 ? 70 : 170; amp = 1.0f; sweep_ms = 50;
+        break;
+    case 65: case 66:                                   /* тимбалы */
+        f0 = note == 65 ? 520 : 400; f1 = f0 * 0.75f; dec = 200; amp = 0.8f; sweep_ms = 60;
+        break;
+    case 67: case 68:                                   /* агого */
+        f0 = note == 67 ? 1050 : 800; f1 = f0; dec = 140; amp = 0.5f;
+        break;
+    case 75: case 76: case 77:                          /* клавесы, вуд-блоки */
+        f0 = note == 75 ? 2500 : note == 76 ? 1700 : 1300; f1 = f0; dec = 45; amp = 0.6f;
         break;
     }
     v->drum = 1;
@@ -609,7 +632,7 @@ static void ensure_open(void)
         return;
     A.tried = 1;
     dump = getenv("BT_AUDIO_DUMP");
-    if (dump && *dump && (A.dump = fopen(dump, "wb")) != NULL) {
+    if (dump && *dump && (A.dump = bt_fopen(dump, "wb")) != NULL) {
         A.dump_bytes = 0;
         wav_header(A.dump, RATE_WANT, 0);
     }
@@ -646,12 +669,13 @@ void audio_pump(void)
     }
     /* считаем от точки отсчёта, а не от прошлого вызова: так округление не копится */
     due = (uint64_t)(now - A.pump_t0) * (uint64_t)A.rate / 1000u;
-    frames = due - A.pump_done;
-    if (due < A.pump_done || frames < BLOCK)
+    if (due < A.pump_done + BLOCK)
         return;
-    A.pump_done = due;
+    /* целыми блоками, как у звуковой карты: огибающие считаются одинаково в обоих режимах */
+    frames = (due - A.pump_done) / BLOCK * BLOCK;
+    A.pump_done += frames;
     if (frames > (uint64_t)A.rate)       /* после долгой паузы не догоняем больше секунды */
-        frames = (uint64_t)A.rate;
+        frames = (uint64_t)A.rate / BLOCK * BLOCK;
     while (frames > 0) {
         int n = frames > 512 ? 512 : (int)frames;
         mix(buf, n);
@@ -1327,7 +1351,30 @@ static int finish_create(int i, int ok)
     return (s->gen << 8) | (i + 1);
 }
 
+static int snd_create_impl(const uint8_t *data, size_t len, int kind);
+
+/* BT_SOUND_TRACE=1 — печатать, что игра делает со звуком (отладка совместимости) */
+static int trace(void)
+{
+    static int t = -1;
+
+    if (t < 0)
+        t = getenv("BT_SOUND_TRACE") != NULL;
+    return t;
+}
+
 int snd_create(const uint8_t *data, size_t len, int kind)
+{
+    int h = snd_create_impl(data, len, kind);
+    Sound *s = get(h);
+
+    if (trace())
+        BT_LOG("звук %d: создан, %s, %u мс%s\n", h & 0xFF, !s ? "—" : s->kind == K_PCM ? "PCM" : "SEQ",
+               s ? s->dur_us / 1000 : 0, s && s->unknown ? " (формат не знаем)" : "");
+    return h;
+}
+
+static int snd_create_impl(const uint8_t *data, size_t len, int kind)
 {
     int i = alloc_slot(), ok;
     Sound *s;
@@ -1356,7 +1403,7 @@ int snd_create(const uint8_t *data, size_t len, int kind)
 
 int snd_create_freq(int hz, int ms)
 {
-    int i = alloc_slot(), note = hz > 0 ? (int)lround(69 + 12 * log2(hz / 440.0)) : -1;
+    int i = alloc_slot(), note = hz > 0 ? (int)lround(69 + 12 * log(hz / 440.0) / log(2.0))   /* log2 в Android 4.1 нет */ : -1;
     uint32_t dur = (uint32_t)(ms > 0 ? ms : 1) * 1000u;
     EvList l = { NULL, 0, 0 };
 
@@ -1380,6 +1427,8 @@ void snd_free(int h)
 
     if (!s)
         return;
+    if (trace())
+        BT_LOG("звук %d: закрыт%s\n", h & 0xFF, s->playing ? " посреди игры" : "");
     lock();
     release_all((int)(s - A.snd), -1, 10);
     sound_free_slot((int)(s - A.snd));
@@ -1398,6 +1447,8 @@ void snd_play(int h)
     if (!s)
         return;
     ensure_open();
+    if (trace())
+        BT_LOG("звук %d: играть (повторов %d)\n", h & 0xFF, s->loops);
     lock();
     if (!s->playing) {
         if (!A.open && !busy()) {
@@ -1416,6 +1467,8 @@ void snd_pause(int h)
 
     if (!s)
         return;
+    if (trace() && s->playing)
+        BT_LOG("звук %d: остановлен\n", h & 0xFF);
     lock();
     s->playing = 0;
     if (s->kind == K_SEQ)
@@ -1506,11 +1559,23 @@ void snd_tone(int note, int ms, int volume)
     snd_play(h);
 }
 
+void snd_play_once(const uint8_t *data, size_t len, int volume)
+{
+    int h = snd_create(data, len, SND_AUTO);
+    Sound *s = get(h);
+
+    if (!s)
+        return;
+    s->temp = 1;
+    snd_set_volume(h, volume);
+    snd_play(h);
+}
+
 /* ---------- audio-render ---------- */
 
 int audio_render_file(const char *in, const char *out, int kind)
 {
-    FILE *f = fopen(in, "rb"), *o;
+    FILE *f = bt_fopen(in, "rb"), *o;
     uint8_t *data;
     long len;
     int16_t buf[BLOCK];
@@ -1534,7 +1599,7 @@ int audio_render_file(const char *in, const char *out, int kind)
     setup(RATE_WANT);
     h = snd_create(data, (size_t)len, kind);
     free(data);
-    if (!get(h) || get(h)->unknown || !(o = fopen(out, "wb"))) {
+    if (!get(h) || get(h)->unknown || !(o = bt_fopen(out, "wb"))) {
         snd_free(h);
         return -1;
     }
