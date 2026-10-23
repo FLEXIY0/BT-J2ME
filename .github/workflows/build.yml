@@ -35,10 +35,13 @@ jobs:
           mkdir -p dist/bt-j2me
           cp bt-j2me README.md dist/bt-j2me/
           tar czf dist/bt-j2me-linux-x86_64.tar.gz -C dist bt-j2me
+          cp bt-j2me dist/bt-j2me-linux-x86_64     # его скачивает встроенное обновление
       - uses: actions/upload-artifact@v4
         with:
           name: linux
-          path: dist/bt-j2me-linux-x86_64.tar.gz
+          path: |
+            dist/bt-j2me-linux-x86_64.tar.gz
+            dist/bt-j2me-linux-x86_64
 
   windows:
     runs-on: ubuntu-22.04
@@ -124,7 +127,7 @@ jobs:
         run: |
           mkdir -p rel
           cp out/bt-j2me.exe out/bt-j2me-console.exe out/bt-j2me-windows-x64.zip \
-             out/bt-j2me-linux-x86_64.tar.gz out/bt-j2me.apk rel/
+             out/bt-j2me-linux-x86_64.tar.gz out/bt-j2me-linux-x86_64 out/bt-j2me.apk rel/
           (cd rel && sha256sum * > SHA256SUMS.txt)
           ls -l rel
       - uses: softprops/action-gh-release@v2

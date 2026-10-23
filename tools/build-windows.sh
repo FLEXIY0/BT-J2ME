@@ -19,7 +19,7 @@ if [ ! -f "$SD/lib/libSDL2.a" ]; then
 fi
 
 LIBS="-L$SD/lib -lmingw32 -lSDL2main -lSDL2 -lm -lkernel32 -luser32 -lgdi32 -lwinmm -limm32 -lole32 \
--loleaut32 -lversion -luuid -ladvapi32 -lsetupapi -lshell32 -ldinput8 -lpthread"
+-loleaut32 -lversion -luuid -lwinhttp -ladvapi32 -lsetupapi -lshell32 -ldinput8 -lpthread"
 CFLAGS="-Os -pipe -I$SD/include/SDL2 -Dmain=SDL_main"
 
 cd "$ROOT"
