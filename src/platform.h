@@ -24,7 +24,8 @@ typedef enum {
     EV_QUIT,        /* закрыли окно / F10 */
     EV_REFRESH,     /* в папке игр что-то поменялось (импорт на Android) — пересканировать полку */
     EV_RESTART,     /* перезапустить игру (сменили размер экрана в настройках кнопок) */
-    EV_SCREENSHOT   /* снимок экрана игры (F12 или кнопка с фотоаппаратом) */
+    EV_SCREENSHOT,  /* снимок экрана игры (F12 или кнопка с фотоаппаратом) */
+    EV_HOVER        /* мышь сдвинулась без нажатия (только в режиме курсора) */
 } EventType;
 
 typedef struct {
@@ -76,6 +77,11 @@ void     platform_text_input(int on);
 void     platform_vibrate(int ms);
 /* Следующие кадры проявляются из черноты за ms (запуск игры после анимации). */
 void     platform_fade_in(int ms);
+/* Режим курсора (лаунчер): системный указатель скрыт — лаунчер рисует свой, мышь шлёт
+ * EV_HOVER, а левый стик геймпада не жмёт стрелки, а читается через platform_stick. */
+void     platform_cursor_mode(int on);
+/* Отклонение левого стика, -1..1 по каждой оси. */
+void     platform_stick(float *x, float *y);
 /* Открыть ссылку системным браузером (platformRequest); 0 — не получилось. */
 int      platform_open_url(const char *url);
 

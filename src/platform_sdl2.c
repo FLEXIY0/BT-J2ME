@@ -22,6 +22,8 @@ static volatile int  games_changed;   /* выставляет Java-часть An
 static Event         queue[QUEUE_LEN];
 static int           q_head, q_len;
 static int           stick_dir[4];   /* вверх, вниз, влево, вправо */
+static int           cursor_mode, fullscreen;
+static float         pad_ax, pad_ay; /* левый стик, -1..1 */
 static SDL_AudioDeviceID audio_dev;
 static AudioMixFn    audio_mix;
 
@@ -154,6 +156,7 @@ int platform_init(const PlatformConfig *cfg)
         BT_LOG("SDL_CreateRenderer: %s\n", SDL_GetError());
         return -1;
     }
+    fullscreen = cfg->fullscreen;
     SDL_ShowCursor(cfg->fullscreen ? SDL_DISABLE : SDL_ENABLE);
     if (touch_on)
         touch_init(ren, touch_emit);
@@ -182,6 +185,22 @@ void platform_shutdown(void)
 Image *platform_screen(void)
 {
     return &screen;
+}
+
+void platform_cursor_mode(int on)
+{
+    int d;
+
+    cursor_mode = on;
+    for (d = 0; d < 4; d++)         /* стрелки, зажатые стиком, отпускаем */
+        stick_dir[d] = 0;
+    SDL_ShowCursor(on || fullscreen ? SDL_DISABLE : SDL_ENABLE);
+}
+
+void platform_stick(float *x, float *y)
+{
+    *x = pad_ax;
+    *y = pad_ay;
 }
 
 static int      fade_ms;
@@ -456,6 +475,12 @@ static void translate(const SDL_Event *e)
         break;
     case SDL_CONTROLLERAXISMOTION:
         if (e->caxis.axis == SDL_CONTROLLER_AXIS_LEFTX)
+            pad_ax = (float)e->caxis.value / 32767.0f;
+        else if (e->caxis.axis == SDL_CONTROLLER_AXIS_LEFTY)
+            pad_ay = (float)e->caxis.value / 32767.0f;
+        if (cursor_mode)
+            break;      /* стик водит курсор лаунчера */
+        if (e->caxis.axis == SDL_CONTROLLER_AXIS_LEFTX)
             stick_axis(e->caxis.value, 2, 3, KEY_LEFT, KEY_RIGHT);
         else if (e->caxis.axis == SDL_CONTROLLER_AXIS_LEFTY)
             stick_axis(e->caxis.value, 0, 1, KEY_UP, KEY_DOWN);
@@ -478,6 +503,10 @@ static void translate(const SDL_Event *e)
     case SDL_MOUSEMOTION:
         if (!touch_on && (e->motion.state & SDL_BUTTON_LMASK)) {
             push(EV_POINTER_MOVE, 0);
+            queue[(q_head + q_len - 1) % QUEUE_LEN].x = e->motion.x;
+            queue[(q_head + q_len - 1) % QUEUE_LEN].y = e->motion.y;
+        } else if (!touch_on && cursor_mode) {
+            push(EV_HOVER, 0);
             queue[(q_head + q_len - 1) % QUEUE_LEN].x = e->motion.x;
             queue[(q_head + q_len - 1) % QUEUE_LEN].y = e->motion.y;
         }

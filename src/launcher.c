@@ -72,6 +72,10 @@ typedef struct {
     int          fx;            /* вид анимации запуска */
     int          ptr_down, ptr_x0, ptr_y0, ptr_x, ptr_y;   /* касание: тап или свайп решаем при отпускании */
     uint32_t     pad_flash;
+    /* свой курсор-рука: мышь (1) или левый стик геймпада (2), 0 — спрятан */
+    int          cur_on, cur_press;
+    float        cur_x, cur_y;
+    uint32_t     cur_t;
     uint32_t     launch_t0;
 } Ui;
 
@@ -1156,7 +1160,10 @@ static int run_game(Ui *ui, Game *g)
 
     if (ui->fx == FX_SHATTER)
         platform_fade_in(700);     /* анимация ушла в черноту — игра из неё проявляется */
+    platform_cursor_mode(0);        /* в игре стик снова крестовина, указатель — системный */
     r = midp_run(g->path, g->base, mode, err, sizeof(err));
+    platform_cursor_mode(1);
+    ui->cur_press = 0;
 
     if (r == MIDP_QUIT)
         return 1;
@@ -1671,6 +1678,109 @@ static void rescan(Ui *ui, const char *games_dir)
     ui->pos = (float)ui->sel;
 }
 
+/* ---------- курсор ---------- */
+
+/* Рука-указатель: # — контур, o — перчатка, - — тень. Кончик пальца — точка (3, 0). */
+static const char *const cursor_hand[16] = {
+    "...##.........", "..#oo#........", "..#oo#........", "..#oo#........",
+    "..#oo###......", "..#oo#oo###...", "..#oo#oo#oo##.", "###oooooo#oo-#",
+    "#oo#ooooooooo#", "#ooooooooooo-#", ".#oooooooooo-#", ".#ooooooooo--#",
+    "..#ooooooo--#.", "..#oooooo---#.", "...#oooo---#..", "...########..." };
+
+static void draw_cursor(Ui *ui, uint32_t now)
+{
+    int s = imax(1, ui->s), x0, y0, x, y, pass;
+
+    if (!ui->cur_on || ui->launch_t0 || (ui->cur_on == 2 && now - ui->cur_t > 6000))
+        return;
+    x0 = (int)ui->cur_x - 3 * s;
+    y0 = (int)ui->cur_y + (ui->cur_press ? s : 0);     /* нажатие — палец «вдавливается» */
+    for (pass = 0; pass < 2; pass++)    /* сначала мягкая тень, потом сама рука */
+        for (y = 0; y < 16; y++)
+            for (x = 0; x < 14; x++) {
+                char c = cursor_hand[y][x];
+                uint32_t col;
+                if (c == '.')
+                    continue;
+                if (!pass) {
+                    if (!ui->cur_press)
+                        gfx_fill(ui->scr, x0 + (x + 1) * s, y0 + (y + 1) * s, s, s, 0x50000000u);
+                    continue;
+                }
+                col = c == '#' ? 0xFF1B1622u : c == '-' ? 0xFFC9C0D6u :
+                      ui->cur_press ? 0xFFE6E0EEu : 0xFFFFFFFFu;
+                gfx_fill(ui->scr, x0 + x * s, y0 + y * s, s, s, col);
+            }
+}
+
+/* Курсор поверх событий: мышь двигает его, кнопка A при курсоре от стика — клик под ним.
+ * Возвращает 0, если событие съедено целиком. */
+static int cursor_event(Ui *ui, Event *ev, uint32_t now)
+{
+    switch (ev->type) {
+    case EV_HOVER:
+        ui->cur_on = 1;
+        ui->cur_x = (float)ev->x;
+        ui->cur_y = (float)ev->y;
+        return 0;
+    case EV_POINTER_DOWN: case EV_POINTER_MOVE: case EV_POINTER_UP:
+        ui->cur_on = 1;
+        ui->cur_x = (float)ev->x;
+        ui->cur_y = (float)ev->y;
+        ui->cur_press = ev->type != EV_POINTER_UP;
+        return 1;
+    case EV_KEY_DOWN: case EV_KEY_UP:
+        if (ev->pad && ev->key == KEY_FIRE && ui->cur_on == 2 && now - ui->cur_t <= 6000) {
+            ev->type = ev->type == EV_KEY_DOWN ? EV_POINTER_DOWN : EV_POINTER_UP;
+            ev->x = (int)ui->cur_x;
+            ev->y = (int)ui->cur_y;
+            ui->cur_press = ev->type == EV_POINTER_DOWN;
+            ui->cur_t = now;
+        } else if (ev->type == EV_KEY_DOWN) {
+            ui->cur_on = 0;     /* взялись за клавиши или крестовину — курсор не мешает */
+            ui->cur_press = 0;
+        }
+        return 1;
+    default:
+        return 1;
+    }
+}
+
+/* Левый стик водит курсор: скорость растёт с наклоном, у края — мёртвая зона. */
+static void cursor_stick(Ui *ui, float dt, uint32_t now)
+{
+    float sx, sy, mag, v;
+
+    platform_stick(&sx, &sy);
+    mag = sqrtf(sx * sx + sy * sy);
+    if (mag < 0.2f)
+        return;
+    if (ui->cur_on != 2) {
+        if (ui->cur_on == 0) {          /* появляется посередине экрана */
+            ui->cur_x = (float)ui->W / 2;
+            ui->cur_y = (float)ui->H / 2;
+        }
+        ui->cur_on = 2;
+    }
+    v = (float)(ui->W + ui->H) * 0.6f * (mag - 0.2f) / 0.8f * (0.35f + 0.65f * mag) / mag;
+    ui->cur_x = clampf(ui->cur_x + sx * v * dt, 0, (float)ui->W - 1);
+    ui->cur_y = clampf(ui->cur_y + sy * v * dt, 0, (float)ui->H - 1);
+    ui->cur_t = now;
+    if (ui->cur_press) {                /* A зажата — тянем, как пальцем */
+        Event mv;
+        memset(&mv, 0, sizeof(mv));
+        mv.type = EV_POINTER_MOVE;
+        mv.x = (int)ui->cur_x;
+        mv.y = (int)ui->cur_y;
+        if (ui->ce) {
+            ce_event(ui, &mv);
+        } else if (ui->ptr_down) {
+            ui->ptr_x = mv.x;
+            ui->ptr_y = mv.y;
+        }
+    }
+}
+
 int launcher_run(const char *games_dir, PlatformConfig *cfg)
 {
     static Ui ui;
@@ -1697,6 +1807,7 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
         snprintf(ui.lib.dir, sizeof(ui.lib.dir), "%s", games_dir);
     layout(&ui);
     platform_display_size(&dw, &dh);
+    platform_cursor_mode(1);
     prev = platform_ticks_ms();
 
     while (running) {
@@ -1716,6 +1827,8 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
         while (platform_poll(&ev)) {
             if (ev.type == EV_QUIT)
                 running = 0;
+            if (!cursor_event(&ui, &ev, now))
+                continue;
             if (ui.ce && ev.type != EV_QUIT) {
                 ce_event(&ui, &ev);
                 continue;
@@ -1778,6 +1891,8 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
         else if (row > ui.grid_scroll + (float)visible_rows - 1)
             ui.grid_scroll += (row - (float)visible_rows + 1 - ui.grid_scroll) * clampf(dt * 14.0f, 0, 1);
 
+        if (!ui.launch_t0)
+            cursor_stick(&ui, dt, now);
         load_covers(&ui, now);
         if (ui.ce) {
             draw_cover_editor(&ui);
@@ -1804,6 +1919,7 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
                     draw_launch_overlay(&ui, now);
             }
         }
+        draw_cursor(&ui, now);
         platform_present();
 
         if (ui.launch_t0 && now - ui.launch_t0 >= (uint32_t)(ui.fx == FX_SHATTER ? 3300 : 1700)) {
