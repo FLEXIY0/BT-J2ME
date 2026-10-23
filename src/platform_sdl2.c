@@ -1,4 +1,5 @@
 #include "platform.h"
+#include "cursor.h"
 #include "touch.h"
 #include "util.h"
 
@@ -22,7 +23,12 @@ static volatile int  games_changed;   /* выставляет Java-часть An
 static Event         queue[QUEUE_LEN];
 static int           q_head, q_len;
 static int           stick_dir[4];   /* вверх, вниз, влево, вправо */
-static int           cursor_mode, fullscreen;
+static int           cursor_mode;
+static SDL_Cursor   *hand_cursor;    /* рука в играх: видна, пока мышью пользуются */
+static int           mouse_shown;
+static uint32_t      mouse_seen;
+static void show_mouse(int on);
+static void make_hand_cursor(void);
 static float         pad_ax, pad_ay; /* левый стик, -1..1 */
 static SDL_AudioDeviceID audio_dev;
 static AudioMixFn    audio_mix;
@@ -156,8 +162,9 @@ int platform_init(const PlatformConfig *cfg)
         BT_LOG("SDL_CreateRenderer: %s\n", SDL_GetError());
         return -1;
     }
-    fullscreen = cfg->fullscreen;
-    SDL_ShowCursor(cfg->fullscreen ? SDL_DISABLE : SDL_ENABLE);
+    if (!touch_on)
+        make_hand_cursor();
+    show_mouse(0);
     if (touch_on)
         touch_init(ren, touch_emit);
     /* Уже подключённые геймпады придут событиями SDL_CONTROLLERDEVICEADDED. */
@@ -166,6 +173,9 @@ int platform_init(const PlatformConfig *cfg)
 
 void platform_shutdown(void)
 {
+    if (hand_cursor)
+        SDL_FreeCursor(hand_cursor);
+    hand_cursor = NULL;
     if (touch_on)
         touch_shutdown();
     platform_audio_close();
@@ -187,6 +197,36 @@ Image *platform_screen(void)
     return &screen;
 }
 
+static void show_mouse(int on)
+{
+    mouse_shown = on;
+    SDL_ShowCursor(on ? SDL_ENABLE : SDL_DISABLE);
+}
+
+/* Системный курсор — та же пиксельная рука, что в лаунчере, крупнее на больших экранах. */
+static void make_hand_cursor(void)
+{
+    SDL_DisplayMode dm;
+    SDL_Surface *sf;
+    int s = 2, x, y;
+
+    if (SDL_GetDesktopDisplayMode(0, &dm) == 0)
+        s = dm.h >= 1400 ? 3 : dm.h >= 700 ? 2 : 1;
+    sf = SDL_CreateRGBSurfaceWithFormat(0, CURSOR_W * s, CURSOR_H * s, 32, SDL_PIXELFORMAT_ARGB8888);
+    if (!sf)
+        return;
+    for (y = 0; y < CURSOR_H * s; y++)
+        for (x = 0; x < CURSOR_W * s; x++) {
+            char c = cursor_hand[y / s][x / s];
+            ((Uint32 *)((Uint8 *)sf->pixels + y * sf->pitch))[x] =
+                c == '#' ? 0xFF1B1622u : c == '-' ? 0xFFC9C0D6u : c == 'o' ? 0xFFFFFFFFu : 0;
+        }
+    hand_cursor = SDL_CreateColorCursor(sf, CURSOR_HX * s, 0);
+    SDL_FreeSurface(sf);
+    if (hand_cursor)
+        SDL_SetCursor(hand_cursor);
+}
+
 void platform_cursor_mode(int on)
 {
     int d;
@@ -194,7 +234,7 @@ void platform_cursor_mode(int on)
     cursor_mode = on;
     for (d = 0; d < 4; d++)         /* стрелки, зажатые стиком, отпускаем */
         stick_dir[d] = 0;
-    SDL_ShowCursor(on || fullscreen ? SDL_DISABLE : SDL_ENABLE);
+    show_mouse(0);      /* в лаунчере рука рисуется сама; в игре появится, когда тронут мышь */
 }
 
 void platform_stick(float *x, float *y)
@@ -410,6 +450,15 @@ static void translate(const SDL_Event *e)
 {
     int key;
 
+    if (!touch_on && !cursor_mode) {    /* в игре рука видна, только пока мышью пользуются */
+        if (e->type == SDL_MOUSEMOTION || e->type == SDL_MOUSEBUTTONDOWN) {
+            mouse_seen = SDL_GetTicks();
+            if (!mouse_shown)
+                show_mouse(1);
+        } else if (mouse_shown && (e->type == SDL_KEYDOWN || e->type == SDL_CONTROLLERBUTTONDOWN)) {
+            show_mouse(0);
+        }
+    }
     switch (e->type) {
     case SDL_QUIT:
         push(EV_QUIT, 0);
@@ -524,6 +573,9 @@ int platform_poll(Event *ev)
     }
     while (!q_len && SDL_PollEvent(&e))
         translate(&e);
+    if (mouse_shown && !cursor_mode && SDL_GetTicks() - mouse_seen > 2500 &&
+        !(SDL_GetMouseState(NULL, NULL) & SDL_BUTTON_LMASK))
+        show_mouse(0);
     if (touch_on) {
         touch_tick(SDL_GetTicks());
         if (touch_take_restart())

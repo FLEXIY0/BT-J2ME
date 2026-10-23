@@ -5,6 +5,7 @@
 #include "compat.h"
 #include "png.h"
 #include "audio.h"
+#include "cursor.h"
 #include "util.h"
 
 #include <math.h>
@@ -1680,24 +1681,17 @@ static void rescan(Ui *ui, const char *games_dir)
 
 /* ---------- курсор ---------- */
 
-/* Рука-указатель: # — контур, o — перчатка, - — тень. Кончик пальца — точка (3, 0). */
-static const char *const cursor_hand[16] = {
-    "...##.........", "..#oo#........", "..#oo#........", "..#oo#........",
-    "..#oo###......", "..#oo#oo###...", "..#oo#oo#oo##.", "###oooooo#oo-#",
-    "#oo#ooooooooo#", "#ooooooooooo-#", ".#oooooooooo-#", ".#ooooooooo--#",
-    "..#ooooooo--#.", "..#oooooo---#.", "...#oooo---#..", "...########..." };
-
 static void draw_cursor(Ui *ui, uint32_t now)
 {
     int s = imax(1, ui->s), x0, y0, x, y, pass;
 
     if (!ui->cur_on || ui->launch_t0 || (ui->cur_on == 2 && now - ui->cur_t > 6000))
         return;
-    x0 = (int)ui->cur_x - 3 * s;
+    x0 = (int)ui->cur_x - CURSOR_HX * s;
     y0 = (int)ui->cur_y + (ui->cur_press ? s : 0);     /* нажатие — палец «вдавливается» */
     for (pass = 0; pass < 2; pass++)    /* сначала мягкая тень, потом сама рука */
-        for (y = 0; y < 16; y++)
-            for (x = 0; x < 14; x++) {
+        for (y = 0; y < CURSOR_H; y++)
+            for (x = 0; x < CURSOR_W; x++) {
                 char c = cursor_hand[y][x];
                 uint32_t col;
                 if (c == '.')
