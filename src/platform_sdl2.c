@@ -42,6 +42,13 @@ static SDL_Rect      game_dst;      /* куда на окне ложится э�
 #define MAX_WIDE 64
 static int           pc_full = 1, pc_scale = -1, pc_mute, pc_loaded, pc_hints = 1;
 static int           pad_lb, pad_rb; /* плечевые зажаты — LB+RB прячет подсказки */
+/* Фильтры картинки игры: цвет меняем в кадре игры, а строки ЭЛТ и сетку ЖК — накладкой поверх. */
+enum { FL_NONE, FL_CRT, FL_COARSE, FL_GAMEBOY, FL_LCD, FL_GRAY, FL_SEPIA, FL_COUNT };
+static int           pc_filter;
+static uint32_t     *filt_px;       /* кадр игры после фильтра */
+static size_t        filt_cap;
+static SDL_Texture  *ov_tex;        /* накладка: строки ЭЛТ или сетка пикселей */
+static int           ov_filter, ov_w, ov_h, ov_k;
 static char          pc_wide[MAX_WIDE][128];
 static char          pc_latch[MAX_WIDE][128]; /* игры с залипанием стрелок */
 static int           pc_nlatch;
@@ -144,6 +151,136 @@ static void mouse_to_screen(int wx, int wy, int *x, int *y)
     }
     *x = game_dst.w > 0 ? (wx - game_dst.x) * screen.w / game_dst.w : wx;
     *y = game_dst.h > 0 ? (wy - game_dst.y) * screen.h / game_dst.h : wy;
+}
+
+/* Цвет одного пикселя после фильтра; x, y — для узора смешения у Game Boy. */
+static uint32_t filter_px(uint32_t p, int x, int y)
+{
+    static const uint32_t gb[4] = { 0xFF0F380Fu, 0xFF306230u, 0xFF8BAC0Fu, 0xFF9BBC0Fu };
+    static const int bayer[4] = { 0, 32, 48, 16 };
+    int r = (int)(p >> 16 & 255), g = (int)(p >> 8 & 255), b = (int)(p & 255);
+    int l = (r * 77 + g * 150 + b * 29) >> 8;
+
+    switch (pc_filter) {
+    case FL_GAMEBOY:
+        l = (l * 3 + bayer[(y & 1) * 2 + (x & 1)] + 8) >> 8;
+        return gb[l > 3 ? 3 : l];
+    case FL_GRAY:
+        return 0xFF000000u | (uint32_t)l << 16 | (uint32_t)l << 8 | (uint32_t)l;
+    case FL_SEPIA:
+        r = l * 112 / 100 + 18;
+        g = l * 95 / 100 + 8;
+        b = l * 72 / 100;
+        return 0xFF000000u | (uint32_t)(r > 255 ? 255 : r) << 16 | (uint32_t)(g > 255 ? 255 : g) << 8 | (uint32_t)b;
+    case FL_COARSE:     /* по 3 бита на канал — грубая палитра, как у первых цветных телефонов */
+        p &= 0xE0E0E0u;
+        return 0xFF000000u | p | p >> 3 | (p & 0xC0C0C0u) >> 6;
+    default:
+        return p;
+    }
+}
+
+/* Кадр игры с фильтром или NULL, если цвет не меняется. */
+static const uint32_t *filter_frame(void)
+{
+    int w = screen.w, h = screen.h, x, y;
+    size_t n = (size_t)w * (size_t)h;
+    const uint32_t *src = screen.px;
+    uint32_t *d;
+
+    if (cursor_mode || pc_filter == FL_NONE || pc_filter == FL_LCD || !src)
+        return NULL;
+    if (n > filt_cap) {
+        uint32_t *p = realloc(filt_px, n * 4);
+        if (!p)
+            return NULL;
+        filt_px = p;
+        filt_cap = n;
+    }
+    d = filt_px;
+    if (pc_filter == FL_CRT) {
+        /* кинескоп: соседние точки чуть сливаются, к углам темнее, общий тон ярче — строки его съедят */
+        for (y = 0; y < h; y++) {
+            float dy = (float)(2 * y - h) / (float)h;
+            for (x = 0; x < w; x++) {
+                float dx = (float)(2 * x - w) / (float)w, r = (dx * dx + dy * dy) * 0.5f, v = 1.16f - 0.3f * r * r;
+                uint32_t p = src[y * w + x], q = src[y * w + (x ? x - 1 : 0)];
+                int c, out = 0, sh;
+                for (sh = 0; sh < 24; sh += 8) {
+                    c = (int)((float)((int)(p >> sh & 255) * 3 + (int)(q >> sh & 255)) * 0.25f * v);
+                    out |= (c > 255 ? 255 : c < 0 ? 0 : c) << sh;
+                }
+                d[y * w + x] = 0xFF000000u | (uint32_t)out;
+            }
+        }
+    } else if (pc_filter == FL_COARSE) {
+        /* грубые пиксели: каждый квадрат 2×2 — одного цвета, среднего по квадрату */
+        for (y = 0; y < h; y += 2)
+            for (x = 0; x < w; x += 2) {
+                int x1 = x + 1 < w ? x + 1 : x, y1 = y + 1 < h ? y + 1 : y, sh;
+                uint32_t a = src[y * w + x], b = src[y * w + x1], c = src[y1 * w + x], e = src[y1 * w + x1], m = 0;
+                for (sh = 0; sh < 24; sh += 8)
+                    m |= (((a >> sh & 255) + (b >> sh & 255) + (c >> sh & 255) + (e >> sh & 255) + 2) / 4) << sh;
+                m = filter_px(m, x, y);
+                d[y * w + x] = d[y * w + x1] = d[y1 * w + x] = d[y1 * w + x1] = m;
+            }
+    } else {
+        for (y = 0; y < h; y++)
+            for (x = 0; x < w; x++)
+                d[y * w + x] = filter_px(src[y * w + x], x, y);
+    }
+    return d;
+}
+
+static void upload(void)
+{
+    const uint32_t *p = filter_frame();
+
+    SDL_UpdateTexture(tex, NULL, p ? p : screen.px, screen.w * (int)sizeof(uint32_t));
+}
+
+/* Накладка поверх картинки игры: у ЭЛТ — тёмная строка под каждой строкой игры,
+ * у ЖК и Game Boy — щели между пикселями. На мелком масштабе не рисуем: вышла бы рябь. */
+static void filter_overlay(const SDL_Rect *dst)
+{
+    int k, grid = pc_filter == FL_LCD || pc_filter == FL_GAMEBOY, tw, th, x, y;
+    uint32_t *px, line;
+
+    if (cursor_mode || !screen.px || (pc_filter != FL_CRT && !grid))
+        return;
+    k = dst->h / screen.h < dst->w / screen.w ? dst->h / screen.h : dst->w / screen.w;
+    if (k < 2)
+        return;
+    if (k > (grid ? 3 : 4))
+        k = grid ? 3 : 4;
+    tw = grid ? screen.w * k : 1;
+    th = screen.h * k;
+    if (!ov_tex || ov_filter != pc_filter || ov_w != tw || ov_h != th || ov_k != k) {
+        if (ov_tex)
+            SDL_DestroyTexture(ov_tex);
+        ov_tex = NULL;
+        if (!(px = calloc((size_t)tw * (size_t)th, 4)))
+            return;
+        line = pc_filter == FL_CRT ? (k == 2 ? 0x70000000u : 0x9A000000u)
+             : pc_filter == FL_GAMEBOY ? (k == 2 ? 0x40C4CFA1u : 0x60C4CFA1u)
+             : (k == 2 ? 0x38000000u : 0x58000000u);
+        for (y = 0; y < th; y++)
+            for (x = 0; x < tw; x++)
+                if (y % k == k - 1 || (grid && x % k == k - 1))
+                    px[y * tw + x] = line;
+        ov_tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, tw, th);
+        if (ov_tex) {
+            SDL_UpdateTexture(ov_tex, NULL, px, tw * 4);
+            SDL_SetTextureBlendMode(ov_tex, SDL_BLENDMODE_BLEND);
+        }
+        free(px);
+        ov_filter = pc_filter;
+        ov_w = tw;
+        ov_h = th;
+        ov_k = k;
+    }
+    if (ov_tex)
+        SDL_RenderCopy(ren, ov_tex, NULL, dst);
 }
 
 int platform_set_screen(int w, int h, ScaleMode mode)
@@ -259,6 +396,12 @@ void platform_shutdown(void)
         touch_shutdown();
     platform_audio_close();
     image_free(&screen);
+    free(filt_px);
+    filt_px = NULL;
+    filt_cap = 0;
+    if (ov_tex)
+        SDL_DestroyTexture(ov_tex);
+    ov_tex = NULL;
     if (tex)
         SDL_DestroyTexture(tex);
     if (ren)
@@ -343,9 +486,11 @@ static void render(void)
         platform_display_size(&w, &h);
         touch_place(w, h, screen.w, screen.h, scale_mode, &dst);
         SDL_RenderCopy(ren, tex, NULL, &dst);
+        filter_overlay(&dst);
         touch_draw();
     } else {
         SDL_RenderCopy(ren, tex, NULL, &game_dst);
+        filter_overlay(&game_dst);
         if (osk_open)
             osk_draw();
         else if (typing)
@@ -374,7 +519,7 @@ static void render(void)
 
 void platform_present(void)
 {
-    SDL_UpdateTexture(tex, NULL, screen.px, screen.w * (int)sizeof(uint32_t));
+    upload();
     render();
 }
 
@@ -857,6 +1002,8 @@ static void pc_load(void)
             pc_scale = atoi(line + 6);
         else if (!strncmp(line, "hints ", 6))
             pc_hints = atoi(line + 6) != 0;
+        else if (!strncmp(line, "filter ", 7))
+            pc_filter = atoi(line + 7);
         else if (!strncmp(line, "mute ", 5))
             pc_mute = atoi(line + 5) != 0;
         else if (!strncmp(line, "latch ", 6) && pc_nlatch < MAX_WIDE)
@@ -867,6 +1014,8 @@ static void pc_load(void)
     fclose(f);
     if (pc_scale < -1 || pc_scale > SCALE_STRETCH)
         pc_scale = -1;
+    if (pc_filter < 0 || pc_filter >= FL_COUNT)
+        pc_filter = FL_NONE;
 }
 
 static void pc_save(void)
@@ -878,7 +1027,8 @@ static void pc_save(void)
     pc_path(path, sizeof(path), 1);
     if (!(f = bt_fopen(path, "wb")))
         return;
-    fprintf(f, "fullscreen %d\nscale %d\nmute %d\nhints %d\n", pc_full, pc_scale, pc_mute, pc_hints);
+    fprintf(f, "fullscreen %d\nscale %d\nmute %d\nhints %d\nfilter %d\n", pc_full, pc_scale, pc_mute, pc_hints,
+            pc_filter);
     for (i = 0; i < pc_nwide; i++)
         fprintf(f, "wide %s\n", pc_wide[i]);
     for (i = 0; i < pc_nlatch; i++)
@@ -922,7 +1072,7 @@ static void set_fullscreen(int on)
 }
 
 /* Пункты меню. */
-enum { MI_RESUME, MI_FULL, MI_SCALE, MI_WIDE, MI_LATCH, MI_SOUND, MI_HINTS, MI_SHOT, MI_EXIT, MI_COUNT };
+enum { MI_RESUME, MI_FULL, MI_SCALE, MI_FILTER, MI_WIDE, MI_LATCH, MI_SOUND, MI_HINTS, MI_SHOT, MI_EXIT, MI_COUNT };
 
 #define MENU_W     236
 #define MENU_ROW   18
@@ -937,12 +1087,15 @@ static SDL_Rect     menu_dst;
 static void menu_label(int i, char *out, size_t cap)
 {
     static const char *const scales[] = { "чёткий", "по размеру", "авто", "растянуть" };
+    static const char *const filters[FL_COUNT] = { "нет", "ЭЛТ", "грубые пиксели", "Game Boy", "ЖК-экран",
+                                                   "ч/б", "сепия" };
     int sc = pc_scale >= 0 ? pc_scale : (int)scale_mode;
 
     switch (i) {
     case MI_RESUME: snprintf(out, cap, "Продолжить"); break;
     case MI_FULL:   snprintf(out, cap, "Экран: %s", pc_full ? "полный" : "окно"); break;
     case MI_SCALE:  snprintf(out, cap, "Масштаб: %s", scales[sc < 0 || sc > 3 ? 2 : sc]); break;
+    case MI_FILTER: snprintf(out, cap, "Фильтр: %s", filters[pc_filter]); break;
     case MI_WIDE:   snprintf(out, cap, "Широкий экран: %s", pc_wide_index(pc_game) >= 0 ? "да" : "нет"); break;
     case MI_LATCH:  snprintf(out, cap, "Залипание стрелок: %s", pc_latch_index(pc_game) >= 0 ? "да" : "нет"); break;
     case MI_SOUND:  snprintf(out, cap, "Звук: %s", pc_mute ? "выкл" : "вкл"); break;
@@ -1070,6 +1223,12 @@ static void menu_activate(int dir)
         apply_scale();
         break;
     }
+    case MI_FILTER:
+        pc_filter = (pc_filter + (dir < 0 ? FL_COUNT - 1 : 1)) % FL_COUNT;
+        pc_save();
+        if (tex && screen.px)
+            upload();           /* игра на паузе — перекрашиваем последний её кадр */
+        break;
     case MI_WIDE: {
         int i = pc_wide_index(pc_game);
         if (!pc_game[0])
@@ -1115,6 +1274,12 @@ static void menu_activate(int dir)
     render();
 }
 
+/* Пункт меняется стрелками влево-вправо. */
+static int menu_toggle(int i)
+{
+    return i == MI_SCALE || i == MI_FILTER || i == MI_FULL || i == MI_SOUND || i == MI_LATCH || i == MI_HINTS;
+}
+
 static void menu_move(int d)
 {
     menu_sel = (menu_sel + d + MI_COUNT) % MI_COUNT;
@@ -1137,11 +1302,11 @@ static int menu_event(const SDL_Event *e)
         case SDLK_UP: case SDLK_w: menu_move(-1); return 1;
         case SDLK_DOWN: case SDLK_s: menu_move(1); return 1;
         case SDLK_LEFT: case SDLK_a:
-            if (menu_sel == MI_SCALE || menu_sel == MI_FULL || menu_sel == MI_SOUND || menu_sel == MI_LATCH || menu_sel == MI_HINTS)
+            if (menu_toggle(menu_sel))
                 menu_activate(-1);
             return 1;
         case SDLK_RIGHT: case SDLK_d:
-            if (menu_sel == MI_SCALE || menu_sel == MI_FULL || menu_sel == MI_SOUND || menu_sel == MI_LATCH || menu_sel == MI_HINTS)
+            if (menu_toggle(menu_sel))
                 menu_activate(1);
             return 1;
         case SDLK_RETURN: case SDLK_SPACE: case SDLK_KP_ENTER:

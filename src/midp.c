@@ -1210,7 +1210,7 @@ static void load_jad(const char *jar)
     fclose(f);
 }
 
-static void rms_dir_for(const char *save_id)
+static void rms_dir_path(const char *save_id, char *out, size_t cap)
 {
     const char *xdg = getenv("XDG_DATA_HOME"), *app = bt_appdata();
     char id[256];
@@ -1221,11 +1221,40 @@ static void rms_dir_for(const char *save_id)
         if (id[i] == '/' || id[i] == '\\')
             id[i] = '_';
     if (xdg && *xdg)
-        snprintf(M.rms_dir, sizeof(M.rms_dir), "%s/bt-j2me/rms/%s", xdg, id);
+        snprintf(out, cap, "%s/bt-j2me/rms/%s", xdg, id);
     else if (app)
-        snprintf(M.rms_dir, sizeof(M.rms_dir), "%s/bt-j2me/rms/%s", app, id);
+        snprintf(out, cap, "%s/bt-j2me/rms/%s", app, id);
     else
-        snprintf(M.rms_dir, sizeof(M.rms_dir), "%s/.local/share/bt-j2me/rms/%s", bt_home(), id);
+        snprintf(out, cap, "%s/.local/share/bt-j2me/rms/%s", bt_home(), id);
+}
+
+static void rms_dir_for(const char *save_id)
+{
+    rms_dir_path(save_id, M.rms_dir, sizeof(M.rms_dir));
+}
+
+int midp_saves(const char *save_id, int erase)
+{
+    char dir[1024], names[64][208], path[1300];
+    const char *name;
+    BtDir *d;
+    int n = 0, i;
+
+    rms_dir_path(save_id, dir, sizeof(dir));
+    if (!(d = bt_dir_open(dir)))
+        return 0;
+    /* имена сперва собираем, удаляем потом: стирать прямо во время обхода папки нельзя */
+    while ((name = bt_dir_next(d)) != NULL && n < 64) {
+        size_t len = strlen(name);
+        if (len > 4 && len < sizeof(names[0]) && (!strcmp(name + len - 4, ".rms") || !strcmp(name + len - 4, ".tmp")))
+            snprintf(names[n++], sizeof(names[0]), "%s", name);
+    }
+    bt_dir_close(d);
+    for (i = 0; erase && i < n; i++) {
+        snprintf(path, sizeof(path), "%s/%.207s", dir, names[i]);
+        bt_remove(path);
+    }
+    return n;
 }
 
 MidpResult midp_run(const char *jar, const char *save_id, ScaleMode scale, char *err, size_t errlen)

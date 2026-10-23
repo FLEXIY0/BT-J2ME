@@ -14,5 +14,7 @@ typedef enum {
 
 /* jar — путь к игре; save_id — имя папки сохранений (обычно имя файла без .jar). */
 MidpResult midp_run(const char *jar, const char *save_id, ScaleMode scale, char *err, size_t errlen);
+/* Сколько у игры файлов сохранений; erase — стереть их все (сброс игры к первому запуску). */
+int        midp_saves(const char *save_id, int erase);
 
 #endif

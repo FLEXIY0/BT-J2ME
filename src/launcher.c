@@ -70,6 +70,7 @@ typedef struct {
     char         ce_files[48][64];
     Image        ce_img;
     float        ce_cx, ce_cy, ce_cw, ce_dx, ce_dy;
+    int          rs, rs_sel, rs_n;   /* окно «стереть сохранения игры?»: выбрана кнопка, сколько файлов */
     int          fx;            /* вид анимации запуска */
     int          ptr_down, ptr_x0, ptr_y0, ptr_x, ptr_y;   /* касание: тап или свайп решаем при отпускании */
     uint32_t     pad_flash;
@@ -546,6 +547,7 @@ static void draw_counter(Ui *ui, int cur, int total)
 
 static void draw_add_tile(Ui *ui, int x, int y, int w, int h);
 static void ce_open(Ui *ui);
+static void rs_open(Ui *ui);
 
 static void draw_play(Ui *ui, uint32_t now)
 {
@@ -582,8 +584,9 @@ static void draw_play(Ui *ui, uint32_t now)
         }
     }
     draw_counter(ui, ui->sel + 1, n);
-    /* слева вверху — «картинка»: сменить обложку на кадр из игры */
+    /* слева вверху — «картинка»: сменить обложку на кадр из игры, рядом корзина: сброс игры */
     draw_icon(s, &icon_picture, ui->m, ui->m - 1, 1, ui->th->sub, 0);
+    draw_icon(s, &icon_trash, ui->m + 16, ui->m - 1, 1, ui->th->sub, 0);
     draw_title(ui, &ui->lib.games[ui->sel], ui->title_y, 1);
 }
 
@@ -749,9 +752,12 @@ static void draw_tabs(Ui *ui)
     /* геймпад подключён — сверху подсказки, какая кнопка что делает (мигают при подключении) */
     if (ui->pad_connected && platform_hints() && (ui->pad_flash == 0 || (platform_ticks_ms() / 200) % 2 == 0 ||
                                                   platform_ticks_ms() > ui->pad_flash)) {
-        const char *lg = ui->tab == TAB_PLAY ? "A\tиграть\tView\tобложка\tLB/RB\tвкладки"
+        const char *lg = ui->tab == TAB_PLAY ? "A\tиграть\tView\tобложка\tY\tсброс\tLB/RB\tвкладки"
                        : ui->tab == TAB_LIBRARY ? "A\tвыбрать\tLB/RB\tвкладки" : "A\tвкл/выкл\tLB/RB\tвкладки";
         int lw = gfx_hints(NULL, &font_small, 0, 0, lg, 0);
+        if (lw > ui->W - 2 * (ui->m + 30) && ui->tab == TAB_PLAY)
+            lg = "A\tиграть\tView\tобложка\tY\tсброс";
+        lw = gfx_hints(NULL, &font_small, 0, 0, lg, 0);
         if (lw > ui->W - 2 * (ui->m + 30))
             lg = "A\tиграть\tLB/RB\tвкладки";
         lw = gfx_hints(NULL, &font_small, 0, 0, lg, 0);
@@ -1316,6 +1322,8 @@ static void on_key(Ui *ui, int key, uint32_t now)
             ui->focus_tabs = 1;
         } else if (key == KEY_NUM0) {       /* 0 (View на геймпаде) — сменить обложку */
             ce_open(ui);
+        } else if (key == KEY_CLEAR || key == KEY_NUM0 + 3) {   /* Delete или Y — сбросить игру */
+            rs_open(ui);
         } else if ((key == KEY_FIRE || key == KEY_SOFT_LEFT || key == KEY_NUM0 + 5) && ui->lib.count) {
             start_launch(ui, now);
         }
@@ -1620,6 +1628,103 @@ static void ce_event(Ui *ui, const Event *ev)
     }
 }
 
+/* ---------- сброс игры: стереть её сохранения (рекорды, прогресс, настройки внутри игры) ---------- */
+
+static void rs_open(Ui *ui)
+{
+    if (!ui->lib.count)
+        return;
+    ui->rs = 1;
+    ui->held = 0;
+    ui->rs_sel = 0;                     /* по умолчанию — «отмена»: стереть случайно трудно */
+    ui->rs_n = midp_saves(ui->lib.games[ui->sel].base, 0);
+}
+
+/* Окно: иконка игры, корзина и ряд точек — сколько сохранений; снизу крест и галка. */
+static void rs_geom(const Ui *ui, int *x, int *y, int *w, int *h, int *by, int *bw)
+{
+    *w = imin(ui->W - 2 * ui->m, 120 * ui->s);
+    *h = imin(ui->H - 2 * ui->m, 84 * ui->s);
+    *x = (ui->W - *w) / 2;
+    *y = (ui->H - *h) / 2;
+    *bw = (*w - 3 * 6) / 2;
+    *by = *y + *h - 6 - 15 * ui->s;
+}
+
+static void draw_reset(Ui *ui)
+{
+    static const Icon *const icons[2] = { &icon_cross, &icon_check };
+    Image *s = ui->scr;
+    const Game *g = &ui->lib.games[ui->sel];
+    int x, y, w, h, by, bw, i, ic = 22 * ui->s, cx, cy;
+
+    rs_geom(ui, &x, &y, &w, &h, &by, &bw);
+    gfx_fill(s, 0, 0, ui->W, ui->H, 0x90000000u);
+    rrect(s, x, y, w, h, 3, ui->th->bg_top);
+    cy = y + 8;
+    cx = ui->W / 2;
+    if (g->icon.px) {
+        int k = imax(1, ic / imax(g->icon.w, g->icon.h));
+        gfx_blit_scaled(s, &g->icon, cx - 6 - g->icon.w * k, cy + (ic - g->icon.h * k) / 2, g->icon.w * k,
+                        g->icon.h * k, 255);
+    } else {
+        draw_icon(s, &icon_pad, cx - 6 - icon_pad.w * 2 * ui->s, cy + (ic - icon_pad.h * 2 * ui->s) / 2, 2 * ui->s,
+                  ui->th->sub, 0);
+    }
+    draw_icon(s, &icon_trash, cx + 6, cy + (ic - icon_trash.h * 2 * ui->s) / 2, 2 * ui->s,
+              ui->rs_n ? 0xFFE2483Du : ui->th->divider, 0);
+    /* точки — файлы сохранений; пусто — стирать нечего */
+    for (i = 0; i < ui->rs_n && i < 12; i++)
+        gfx_fill(s, cx - imin(ui->rs_n, 12) * 3 + i * 6 + 1, cy + ic + 6, 3, 3, ui->th->sub);
+    text_fit(s, cx, cy + ic + 13, w - 8, g->name, ui->th->text, 0);
+    for (i = 0; i < 2; i++) {
+        int bx = x + 6 + i * (bw + 6), on = i == 0 || ui->rs_n;
+        uint32_t bg = i == ui->rs_sel ? (i ? 0xFFE2483Du : ui->th->accent) : ui->th->tab_hi;
+        rrect(s, bx, by, bw, 15 * ui->s, 2, bg);
+        draw_icon(s, icons[i], bx + (bw - icons[i]->w * ui->s) / 2, by + (15 * ui->s - icons[i]->h * ui->s) / 2,
+                  ui->s, i == ui->rs_sel ? 0xFFFFFFFFu : on ? ui->th->text : ui->th->divider, 0);
+    }
+}
+
+static void rs_action(Ui *ui, int a)
+{
+    if (a == 1 && ui->rs_n) {
+        midp_saves(ui->lib.games[ui->sel].base, 1);
+        platform_vibrate(40);
+    }
+    ui->rs = 0;
+}
+
+static void rs_event(Ui *ui, const Event *ev)
+{
+    int x, y, w, h, by, bw;
+
+    rs_geom(ui, &x, &y, &w, &h, &by, &bw);
+    switch (ev->type) {
+    case EV_BACK:
+        ui->rs = 0;
+        break;
+    case EV_KEY_DOWN:
+        if (ev->key == KEY_LEFT || ev->key == KEY_NUM0 + 4)
+            ui->rs_sel = 0;
+        else if ((ev->key == KEY_RIGHT || ev->key == KEY_NUM0 + 6) && ui->rs_n)
+            ui->rs_sel = 1;
+        else if (ev->key == KEY_FIRE || ev->key == KEY_NUM0 + 5 || ev->key == KEY_SOFT_LEFT)
+            rs_action(ui, ui->rs_sel);
+        else if (ev->key == KEY_SOFT_RIGHT || ev->key == KEY_CLEAR)
+            ui->rs = 0;
+        break;
+    case EV_POINTER_UP:
+        if (ev->y >= by && ev->y < by + 15 * ui->s && ev->x >= x && ev->x < x + w)
+            rs_action(ui, ev->x >= x + w / 2);
+        else if (ev->x < x || ev->x >= x + w || ev->y < y || ev->y >= y + h)
+            ui->rs = 0;                 /* тап мимо окна — закрыть */
+        break;
+    default:
+        break;
+    }
+}
+
 static void on_pointer(Ui *ui, int px, int py, uint32_t now)
 {
     int i;
@@ -1643,6 +1748,10 @@ static void on_pointer(Ui *ui, int px, int py, uint32_t now)
     }
     if (ui->tab == TAB_PLAY && ui->lib.count && px < ui->m + 14 && py < ui->m + 12) {
         ce_open(ui);
+        return;
+    }
+    if (ui->tab == TAB_PLAY && ui->lib.count && px >= ui->m + 14 && px < ui->m + 30 && py < ui->m + 12) {
+        rs_open(ui);
         return;
     }
     if (ui->tab == TAB_PLAY) {
@@ -1947,6 +2056,10 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
                 ce_event(&ui, &ev);
                 continue;
             }
+            if (ui.rs && ev.type != EV_QUIT) {
+                rs_event(&ui, &ev);
+                continue;
+            }
             if (ui.launch_t0)
                 continue;
             if (ev.type == EV_BACK) {
@@ -2030,6 +2143,8 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
             else
                 draw_settings(&ui);
             draw_tabs(&ui);
+            if (ui.rs)
+                draw_reset(&ui);
             ui.launch_t0 = l0;
             if (ui.launch_t0) {
                 ui.snap = image_new(ui.W, ui.H);
