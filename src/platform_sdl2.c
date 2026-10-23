@@ -51,6 +51,10 @@ static int           text_wanted;   /* игра показала TextBox/пол�
 static int           typing;        /* режим букв: буквы → мультитап, WASD не стрелки */
 static uint32_t      typing_t;
 static int           osk_open;
+static int           pads;          /* подключено геймпадов — подсказки рисуем под них */
+static uint32_t      toast_until;   /* подсказка по кнопкам в начале игры */
+static int           toast_pending;
+static void toast_draw(void);
 static int  typing_key(const SDL_Event *e);
 static int  osk_event(const SDL_Event *e);
 static void osk_draw(void);
@@ -160,6 +164,7 @@ static void open_pad(int index)
 
     if (!SDL_IsGameController(index) || !(gc = SDL_GameControllerOpen(index)))
         return;
+    pads++;
     push_pad(EV_PAD_ADDED, 0);
     queue[(q_head + q_len - 1) % QUEUE_LEN].name = SDL_GameControllerName(gc);
 }
@@ -337,10 +342,16 @@ static void render(void)
         touch_draw();
     } else {
         SDL_RenderCopy(ren, tex, NULL, &game_dst);
+        if (toast_pending) {
+            toast_pending = 0;
+            toast_until = SDL_GetTicks() + 6000;
+        }
         if (osk_open)
             osk_draw();
         else if (typing)
             hint_draw();
+        else if (toast_until && !menu_open)
+            toast_draw();
         if (menu_open)
             menu_draw();
     }
@@ -372,8 +383,14 @@ void platform_touch_profile(const char *game_id)
     if (touch_on)
         touch_profile(game_id);
     snprintf(pc_game, sizeof(pc_game), "%s", game_id ? game_id : "");
-    if (!game_id)
+    if (!game_id) {
         menu_close();
+        osk_open = 0;
+        typing = 0;
+        toast_until = 0;
+    } else if (!touch_on) {
+        toast_pending = 1;          /* подсказка по кнопкам — с первого кадра игры */
+    }
 }
 
 int platform_touch_wide(void)
@@ -621,8 +638,11 @@ static void translate(const SDL_Event *e)
         break;
     case SDL_CONTROLLERDEVICEREMOVED: {
         SDL_GameController *gc = SDL_GameControllerFromInstanceID(e->cdevice.which);
-        if (gc)
+        if (gc) {
             SDL_GameControllerClose(gc);
+            if (pads > 0)
+                pads--;
+        }
         break;
     }
     case SDL_CONTROLLERBUTTONDOWN:
@@ -634,6 +654,9 @@ static void translate(const SDL_Event *e)
                 if (tex)
                     render();
             }
+        } else if (e->cbutton.button == SDL_CONTROLLER_BUTTON_BACK && !touch_on && !cursor_mode) {
+            if (e->type == SDL_CONTROLLERBUTTONDOWN)
+                menu_show();            /* View в игре — меню паузы (кнопку Xbox часто забирает Windows) */
         } else if (e->cbutton.button == SDL_CONTROLLER_BUTTON_GUIDE) {
             if (e->type == SDL_CONTROLLERBUTTONDOWN) {
                 if (!touch_on && !cursor_mode)
@@ -697,6 +720,11 @@ int platform_poll(Event *ev)
         !(SDL_GetMouseState(NULL, NULL) & SDL_BUTTON_LMASK))
         show_mouse(0);
     mt_tick(SDL_GetTicks());
+    if (toast_until && (int32_t)(SDL_GetTicks() - toast_until) >= 0) {
+        toast_until = 0;            /* подсказка ушла — убрать её и с неподвижного кадра */
+        if (tex)
+            render();
+    }
     if (typing && !osk_open && SDL_GetTicks() - typing_t > 8000) {
         typing = 0;                 /* давно не печатали — клавиши снова управление */
         if (tex)
@@ -865,10 +893,10 @@ static void set_fullscreen(int on)
 /* Пункты меню. */
 enum { MI_RESUME, MI_FULL, MI_SCALE, MI_WIDE, MI_SOUND, MI_SHOT, MI_EXIT, MI_COUNT };
 
-#define MENU_W     196
+#define MENU_W     236
 #define MENU_ROW   18
 #define MENU_TOP   30
-#define MENU_H     (MENU_TOP + MI_COUNT * MENU_ROW + 10)
+#define MENU_H     (MENU_TOP + MI_COUNT * MENU_ROW + 24)
 
 static int          menu_sel, menu_dirty, menu_k, menu_stick;
 static Image        menu_img;
@@ -947,6 +975,12 @@ static void menu_draw(void)
             if (i == menu_sel)
                 gfx_fill(m, 6, y, 2, MENU_ROW - 2, 0xFF9C8FF0u);
             gfx_text(m, &font_mid, 14, y + 1, s, i == menu_sel ? 0xFFF4F0FFu : 0xFF8F8899u, 1);
+        }
+        {   /* внизу — какие кнопки что делают */
+            const char *lg = pads ? "A\tвыбрать\tB\tназад\tView\tзакрыть"
+                                  : "[Enter]\tок\t[<][>]\tменять\t[Esc]\tзакрыть";
+            int lw = gfx_hints(NULL, &font_small, 0, 0, lg, 0);
+            gfx_hints(m, &font_small, (MENU_W - lw) / 2, MENU_H - font_small.h - 7, lg, 0xFF8F8899u);
         }
         SDL_UpdateTexture(menu_tex, NULL, menu_img.px, MENU_W * 4);
     }
@@ -1082,7 +1116,6 @@ static int menu_event(const SDL_Event *e)
         case SDL_CONTROLLER_BUTTON_DPAD_LEFT: menu_activate(-1); break;
         case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: case SDL_CONTROLLER_BUTTON_A: menu_activate(1); break;
         case SDL_CONTROLLER_BUTTON_B: case SDL_CONTROLLER_BUTTON_BACK: case SDL_CONTROLLER_BUTTON_GUIDE:
-        case SDL_CONTROLLER_BUTTON_START:
             menu_close();
             break;
         }
@@ -1489,4 +1522,57 @@ static int osk_event(const SDL_Event *e)
     default:
         return 0;                   /* клавиатура ПК работает и при открытой экранной */
     }
+}
+
+int platform_fullscreen(void)
+{
+    return touch_on ? -1 : pc_full;
+}
+
+void platform_set_fullscreen(int on)
+{
+    if (!touch_on)
+        set_fullscreen(on);
+}
+
+/* В начале игры — какие кнопки что делают (геймпад или клавиатура). */
+static void toast_draw(void)
+{
+    static Image img;
+    static SDL_Texture *t;
+    static int for_pad = -1, w, h;
+    const char *lg = pads ? "View\tменю\tL3\tклавиатура\tStart\tлевая софт\tB\tправая софт"
+                          : "[Esc]\tменю\t[F11]\tполный экран\t[Tab]\tввод букв\t[F1][F2]\tсофт-клавиши";
+    int dw, dh, k;
+    SDL_Rect d;
+
+    if (for_pad != (pads > 0)) {
+        for_pad = pads > 0;
+        image_free(&img);
+        if (t)
+            SDL_DestroyTexture(t);
+        t = NULL;
+        w = gfx_hints(NULL, &font_small, 0, 0, lg, 0) + 12;
+        h = font_small.h + 10;
+        img = image_new(w, h);
+        if (!img.px)
+            return;
+        gfx_fill(&img, 0, 0, w, h, 0xE61A1724u);
+        gfx_hints(&img, &font_small, 6, 4, lg, 0xFFEDE8F2u);
+        t = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, w, h);
+        if (t) {
+            SDL_SetTextureBlendMode(t, SDL_BLENDMODE_BLEND);
+            SDL_UpdateTexture(t, NULL, img.px, w * 4);
+        }
+    }
+    if (!t)
+        return;
+    platform_display_size(&dw, &dh);
+    k = dw * 9 / 10 / w;
+    k = k < 1 ? 1 : k > 3 ? 3 : k;
+    d.w = w * k;
+    d.h = h * k;
+    d.x = (dw - d.w) / 2;
+    d.y = dh - d.h - dh / 30;
+    SDL_RenderCopy(ren, t, NULL, &d);
 }

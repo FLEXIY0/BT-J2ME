@@ -1,6 +1,7 @@
 #include "gfx.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -258,6 +259,75 @@ int gfx_text(Image *d, const Font *f, int x, int y, const char *s, uint32_t c, i
                         gfx_fill(d, x + gx * scale, y + gy * scale, scale, scale, c);
             }
         x += f->w * scale;
+    }
+    return x - x0;
+}
+
+int gfx_pad_button(Image *d, const Font *f, int x, int y, const char *name)
+{
+    int h = f->h + 2, w, i, j;
+    uint32_t bg = 0xFF3A3450u, fg = 0xFFF4F0FFu;
+
+    if (!name[1]) {                 /* одна буква: A/B/X/Y — круглые, своих цветов */
+        switch (name[0]) {
+        case 'A': bg = 0xFF4DAF4Au; break;
+        case 'B': bg = 0xFFD8483Fu; break;
+        case 'X': bg = 0xFF3A86D9u; break;
+        case 'Y': bg = 0xFFE2B231u; fg = 0xFF2A2430u; break;
+        }
+        w = h;
+        if (d)
+            for (j = 0; j < h; j++)
+                for (i = 0; i < w; i++) {
+                    int dx = 2 * i + 1 - w, dy = 2 * j + 1 - h;
+                    if (dx * dx + dy * dy <= h * h)
+                        gfx_fill(d, x + i, y + j, 1, 1, bg);
+                }
+    } else {
+        w = gfx_text_width(f, name, 1) + 6;
+        if (d) {
+            gfx_fill(d, x + 1, y, w - 2, h, bg);    /* плашка со скруглёнными краями */
+            gfx_fill(d, x, y + 1, w, h - 2, bg);
+        }
+    }
+    if (d)
+        gfx_text(d, f, x + (w - gfx_text_width(f, name, 1)) / 2, y + 1, name, fg, 1);
+    return w;
+}
+
+int gfx_hints(Image *d, const Font *f, int x, int y, const char *pairs, uint32_t text)
+{
+    char buf[256], *p, *tok[16];
+    int n = 0, i, x0 = x;
+
+    snprintf(buf, sizeof(buf), "%s", pairs);
+    for (p = buf; n < 16; ) {
+        tok[n++] = p;
+        if (!(p = strchr(p, '\t')))
+            break;
+        *p++ = '\0';
+    }
+    for (i = 0; i + 1 < n; i += 2) {
+        const char *b = tok[i];
+        if (i)
+            x += f->w * 2;
+        if (b[0] == '[') {          /* клавиши клавиатуры: [F1][F2] → две плашки */
+            while (*b == '[') {
+                const char *e = strchr(b, ']');
+                char k[32];
+                if (!e)
+                    break;
+                snprintf(k, sizeof(k), "%.*s", (int)(e - b - 1), b + 1);
+                x += gfx_pad_button(d, f, x, y, k) + 1;
+                b = e + 1;
+            }
+        } else {
+            x += gfx_pad_button(d, f, x, y, b);
+        }
+        x += f->w / 2 + 1;
+        if (d)
+            gfx_text(d, f, x, y + 1, tok[i + 1], text, 1);
+        x += gfx_text_width(f, tok[i + 1], 1);
     }
     return x - x0;
 }

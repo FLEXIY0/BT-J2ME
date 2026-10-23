@@ -84,6 +84,9 @@ void     platform_fade_in(int ms);
 void     platform_cursor_mode(int on);
 /* Открыто меню паузы (Esc в игре на ПК): игра стоит, звук молчит. */
 int      platform_paused(void);
+/* Полный экран: 1/0, -1 — переключать нельзя (телефон). */
+int      platform_fullscreen(void);
+void     platform_set_fullscreen(int on);
 /* Отклонение левого стика, -1..1 по каждой оси. */
 void     platform_stick(float *x, float *y);
 /* Открыть ссылку системным браузером (platformRequest); 0 — не получилось. */

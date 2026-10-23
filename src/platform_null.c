@@ -75,6 +75,8 @@ void platform_vibrate(int ms) { (void)ms; }
 void platform_fade_in(int ms) { (void)ms; }
 void platform_cursor_mode(int on) { (void)on; }
 int platform_paused(void) { return 0; }
+int platform_fullscreen(void) { return -1; }
+void platform_set_fullscreen(int on) { (void)on; }
 void platform_stick(float *x, float *y) { *x = *y = 0; }
 int platform_open_url(const char *url) { (void)url; return 0; }
 int platform_touch_wide(void) { return 0; }

@@ -25,7 +25,7 @@
 #define SIDE_SCALE   0.84f
 
 enum { TAB_LIBRARY, TAB_PLAY, TAB_SETTINGS, TAB_COUNT };
-enum { SET_THEME, SET_PIXELS, SET_SHARP, SET_SOUND, SET_COUNT };
+enum { SET_THEME, SET_PIXELS, SET_SHARP, SET_SOUND, SET_FULL, SET_COUNT };
 
 typedef struct {
     uint32_t bg_top, bg_bottom, text, sub, accent, tab_hi, divider, rim, rim_hi, shadow;
@@ -124,6 +124,9 @@ static const Icon icon_speaker = { 11, 11, {
 static const Icon icon_speaker_off = { 11, 11, {
     "....#......", "...##......", "..###......", "#####.#...#", "#####..#.#.",
     "#####...#..", "#####..#.#.", "#####.#...#", "..###......", "...##......", "....#......" } };
+static const Icon icon_full = { 11, 9, {
+    "###.....###", "#.........#", "#.........#", "...........", "...........",
+    "...........", "#.........#", "#.........#", "###.....###" } };
 static const Icon icon_picture = { 11, 9, {
     "###########", "#.........#", "#......##.#", "#......##.#", "#..#......#",
     "#.###...#.#", "#######.###", "###########", "..........." } };
@@ -319,7 +322,8 @@ static void layout(Ui *ui)
     ui->tab_h = icon_pad.h * ui->s + 2 * imax(6, ui->H / 26);
     title_h = font_big.h + 4 + font_small.h;
     gap = imax(8, ui->H / 22);
-    ui->top_min = ui->m + font_small.h / 2 + 2;
+    /* с геймпадом сверху строка подсказок — полка ниже */
+    ui->top_min = ui->m + (ui->pad_connected ? font_small.h + 4 : font_small.h / 2 + 2);
     ui->bottom_max = ui->H - ui->tab_h - imax(6, ui->H / 28);
     ui->lib_title_y = ui->bottom_max - title_h;
     region = ui->bottom_max - ui->top_min - gap - title_h;
@@ -671,15 +675,23 @@ static int settings_row_h(const Ui *ui)
     return 11 * ui->s + 10;
 }
 
+/* Строк настроек: «полный экран» — только там, где есть окно (не на телефоне). */
+static int set_count(void)
+{
+    return platform_fullscreen() < 0 ? SET_COUNT - 1 : SET_COUNT;
+}
+
 static int settings_y0(const Ui *ui)
 {
-    return ui->top_min + (ui->bottom_max - ui->top_min - SET_COUNT * settings_row_h(ui)) / 2;
+    return ui->top_min + (ui->bottom_max - ui->top_min - set_count() * settings_row_h(ui)) / 2;
 }
 
 static void draw_settings(Ui *ui)
 {
     Image *s = ui->scr;
-    int row_h = settings_row_h(ui), rows = SET_COUNT, w = imin(ui->W - 4 * ui->m, 150 * ui->s), i;
+    static const char *const names[SET_COUNT] = { "Тёмная тема", "Крупные пиксели", "Чёткие игры", "Звук",
+                                                  "Полный экран" };
+    int row_h = settings_row_h(ui), rows = set_count(), w = imin(ui->W - 4 * ui->m, 150 * ui->s), i;
     int x = (ui->W - w) / 2, y0 = settings_y0(ui);
 
     for (i = 0; i < rows; i++) {
@@ -705,7 +717,12 @@ static void draw_settings(Ui *ui)
             on = ui->set.sound;
             draw_icon(s, on ? &icon_speaker : &icon_speaker_off, x + 8, iy, ui->s, ic, 0);
             break;
+        case SET_FULL:
+            on = platform_fullscreen() > 0;
+            draw_icon(s, &icon_full, x + 8, iy, ui->s, ic, 0);
+            break;
         }
+        gfx_text(s, &font_small, x + 8 + 16 * ui->s, y + (row_h - 2 - font_small.h) / 2, names[i], ui->th->text, 1);
         draw_switch(ui, x + w - 8 - 18 * ui->s, y + (row_h - 2 - 9 * ui->s) / 2, on);
     }
 }
@@ -730,10 +747,17 @@ static void draw_tabs(Ui *ui)
         draw_icon(s, ic, cx - iw / 2, y0 + (ui->tab_h - ih) / 2 + 1, ui->s,
                   i == ui->tab ? ui->th->accent : ui->th->sub, 0);
     }
-    /* значок подключённого геймпада — мигает при подключении */
+    /* геймпад подключён — сверху подсказки, какая кнопка что делает (мигают при подключении) */
     if (ui->pad_connected && (ui->pad_flash == 0 || (platform_ticks_ms() / 200) % 2 == 0 ||
-                              platform_ticks_ms() > ui->pad_flash))
-        draw_icon(s, &icon_pad, ui->m + icon_picture.w + 6, ui->m - 1, 1, ui->th->sub, 0);   /* правее значка обложки */
+                              platform_ticks_ms() > ui->pad_flash)) {
+        const char *lg = ui->tab == TAB_PLAY ? "A\tиграть\tView\tобложка\tLB/RB\tвкладки"
+                       : ui->tab == TAB_LIBRARY ? "A\tвыбрать\tLB/RB\tвкладки" : "A\tвкл/выкл\tLB/RB\tвкладки";
+        int lw = gfx_hints(NULL, &font_small, 0, 0, lg, 0);
+        if (lw > ui->W - 2 * (ui->m + 30))
+            lg = "A\tиграть\tLB/RB\tвкладки";
+        lw = gfx_hints(NULL, &font_small, 0, 0, lg, 0);
+        gfx_hints(s, &font_small, (ui->W - lw) / 2, ui->m - 3, lg, ui->th->sub);
+    }
 }
 
 /* ---------- анимации запуска ---------- */
@@ -1252,7 +1276,10 @@ static void toggle_setting(Ui *ui, int which)
         ui->set.big_pixels = !ui->set.big_pixels;
     else if (which == SET_SHARP)
         ui->set.sharp = !ui->set.sharp;
-    else {
+    else if (which == SET_FULL) {
+        platform_set_fullscreen(platform_fullscreen() <= 0);   /* запоминает сама платформа */
+        return;
+    } else {
         ui->set.sound = !ui->set.sound;
         if (!ui->cli_mute)
             audio_set_master(ui->set.sound ? 100 : 0);
@@ -1315,7 +1342,7 @@ static void on_key(Ui *ui, int key, uint32_t now)
         if (key == KEY_UP && ui->set_sel > 0)
             ui->set_sel--;
         else if (key == KEY_DOWN)
-            ui->set_sel < SET_COUNT - 1 ? (void)ui->set_sel++ : (void)(ui->focus_tabs = 1);
+            ui->set_sel < set_count() - 1 ? (void)ui->set_sel++ : (void)(ui->focus_tabs = 1);
         else if (key == KEY_FIRE || key == KEY_LEFT || key == KEY_RIGHT)
             toggle_setting(ui, ui->set_sel);
         break;
@@ -1654,7 +1681,7 @@ static void on_pointer(Ui *ui, int px, int py, uint32_t now)
     } else {
         int row_h = settings_row_h(ui), y0 = settings_y0(ui);
         int row = (py - y0) / row_h;
-        if (py >= y0 && row < SET_COUNT) {
+        if (py >= y0 && row < set_count()) {
             ui->set_sel = row;
             toggle_setting(ui, row);
         }
@@ -1939,7 +1966,10 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
                     select_imported(&ui);
                 }
             } else if (ev.type == EV_PAD_ADDED) {
-                ui.pad_connected = 1;
+                if (!ui.pad_connected) {
+                    ui.pad_connected = 1;
+                    layout(&ui);
+                }
                 ui.pad_flash = now + 1600;
             } else if (ev.type == EV_KEY_DOWN) {
                 on_key(&ui, ev.key, now);
