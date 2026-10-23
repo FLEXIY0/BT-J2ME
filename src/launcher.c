@@ -24,7 +24,7 @@
 #define SIDE_SCALE   0.84f
 
 enum { TAB_LIBRARY, TAB_PLAY, TAB_SETTINGS, TAB_COUNT };
-enum { SET_THEME, SET_PIXELS, SET_SHARP, SET_COUNT };
+enum { SET_THEME, SET_PIXELS, SET_SHARP, SET_SOUND, SET_COUNT };
 
 typedef struct {
     uint32_t bg_top, bg_bottom, text, sub, accent, tab_hi, divider, rim, rim_hi, shadow;
@@ -43,6 +43,7 @@ typedef struct {
     int dark;        /* тёмная тема */
     int big_pixels;  /* крупный пиксель (~180 строк) или мелкий (~270) */
     int sharp;       /* игры — только целый масштаб */
+    int sound;       /* звук игр и лаунчера */
 } Settings;
 
 typedef struct {
@@ -52,6 +53,7 @@ typedef struct {
     Settings     set;
     char         set_path[1024];
     ScaleMode    cli_scale;
+    int          cli_mute;      /* --mute: звук выключен, что бы ни стояло в настройках */
     int          W, H, s;                 /* виртуальный экран и масштаб иконок */
     int          m, tab_h, title_y, box_top, box_w, box_h, cover_w, cover_h, small_w, small_h;
     int          top_min, bottom_max, lib_title_y;   /* зона контента между счётчиком и вкладками */
@@ -111,6 +113,12 @@ static const Icon icon_folder = { 13, 10, {
     "#...........#", "#...........#", "#...........#", "#...........#",
     "#...........#", "#############" } };
 
+static const Icon icon_speaker = { 11, 11, {
+    "....#......", "...##...#..", "..###....#.", "#####..#..#", "#####...#.#",
+    "#####...#.#", "#####...#.#", "#####..#..#", "..###....#.", "...##...#..", "....#......" } };
+static const Icon icon_speaker_off = { 11, 11, {
+    "....#......", "...##......", "..###......", "#####.#...#", "#####..#.#.",
+    "#####...#..", "#####..#.#.", "#####.#...#", "..###......", "...##......", "....#......" } };
 static const Icon icon_picture = { 11, 9, {
     "###########", "#.........#", "#......##.#", "#......##.#", "#..#......#",
     "#.###...#.#", "#######.###", "###########", "..........." } };
@@ -238,6 +246,7 @@ static void settings_load(Ui *ui)
     ui->set.dark = 0;
     ui->set.big_pixels = 1;
     ui->set.sharp = 0;
+    ui->set.sound = 1;
     settings_path(ui);
     snprintf(path, sizeof(path), "%s/settings", ui->set_path);
     if (!(f = bt_fopen(path, "r")))
@@ -249,6 +258,8 @@ static void settings_load(Ui *ui)
             ui->set.big_pixels = val != 0;
         else if (!strcmp(key, "sharp"))
             ui->set.sharp = val != 0;
+        else if (!strcmp(key, "sound"))
+            ui->set.sound = val != 0;
     }
     fclose(f);
 }
@@ -268,7 +279,8 @@ static void settings_save(const Ui *ui)
     snprintf(path, sizeof(path), "%s/settings", ui->set_path);
     if (!(f = bt_fopen(path, "w")))
         return;
-    fprintf(f, "dark=%d\nbig_pixels=%d\nsharp=%d\n", ui->set.dark, ui->set.big_pixels, ui->set.sharp);
+    fprintf(f, "dark=%d\nbig_pixels=%d\nsharp=%d\nsound=%d\n", ui->set.dark, ui->set.big_pixels, ui->set.sharp,
+            ui->set.sound);
     fclose(f);
 }
 
@@ -684,6 +696,10 @@ static void draw_settings(Ui *ui)
             on = ui->set.sharp;
             draw_sharp_icon(ui, x + 8, iy, on, ic);
             break;
+        case SET_SOUND:
+            on = ui->set.sound;
+            draw_icon(s, on ? &icon_speaker : &icon_speaker_off, x + 8, iy, ui->s, ic, 0);
+            break;
         }
         draw_switch(ui, x + w - 8 - 18 * ui->s, y + (row_h - 2 - 9 * ui->s) / 2, on);
     }
@@ -761,6 +777,28 @@ static void fx_stretch(Image *dst, const Image *src, float sx, float sy, float s
             int px = dx + x, tx = (int)(sx + (float)x * sw / (float)dw);
             if (px >= 0 && px < dst->w && tx >= 0 && tx < src->w)
                 dst->px[py * dst->w + px] = src->px[ty * src->w + tx];
+        }
+    }
+}
+
+/* То же, но пиксели источника внутри прямоугольника ex (коробка) пропускаются — плитка
+ * полки, задевшая коробку, падает без её кусочка. */
+static void fx_stretch_ex(Image *dst, const Image *src, int sx, int sy, int sw, int sh,
+                          int dx, int dy, int dw, int dh, int ex, int ey, int ew, int eh)
+{
+    int x, y;
+
+    for (y = 0; y < dh; y++) {
+        int py = dy + y, ty = sy + y * sh / dh;
+        if (py < 0 || py >= dst->h || ty < 0 || ty >= src->h)
+            continue;
+        for (x = 0; x < dw; x++) {
+            int px = dx + x, tx = sx + x * sw / dw;
+            if (px < 0 || px >= dst->w || tx < 0 || tx >= src->w)
+                continue;
+            if (tx >= ex && tx < ex + ew && ty >= ey && ty < ey + eh)
+                continue;
+            dst->px[py * dst->w + px] = src->px[ty * src->w + tx];
         }
     }
 }
@@ -919,8 +957,8 @@ static void launch_fx(Ui *ui, float t, uint32_t now)
                 float d = sqrtf((mx - cx) * (mx - cx) + (my - cy) * (my - cy)) / maxd;
                 float delay, lt, vx, vy, ox, oy, sc;
                 int sz;
-                if (mx >= bx && mx < bx + bw && my >= by && my < by + bh)
-                    continue;               /* коробку рисуем отдельно, целиком */
+                if (x >= bx && x + b <= bx + bw && y >= by && y + b <= by + bh)
+                    continue;               /* плитка целиком внутри коробки — коробка рисуется отдельно */
                 fx_seed = (uint32_t)(x * 7919 + y * 104729 + 1);
                 vx = ((mx - cx) / maxd * 2 + (fx_frand() - 0.5f)) * 0.5f;    /* волна толкает от коробки */
                 vy = -0.35f - fx_frand() * 0.5f;
@@ -934,8 +972,8 @@ static void launch_fx(Ui *ui, float t, uint32_t now)
                 oy = (vy * lt + 2.8f * lt * lt) * (float)ui->H * 0.3f;
                 sc = 1 - lt * 0.5f;
                 sz = imax(1, (int)((float)b * sc));
-                fx_stretch(s, src, (float)x, (float)y, (float)b, (float)b,
-                           (int)(mx + ox - (float)sz / 2), (int)(my + oy - (float)sz / 2), sz, sz);
+                fx_stretch_ex(s, src, x, y, b, b, (int)(mx + ox - (float)sz / 2), (int)(my + oy - (float)sz / 2),
+                              sz, sz, bx, by, bw, bh);
             }
         if (wave > 0 && wave < 1) {         /* ударная волна — кольцо от коробки */
             float rr = wave * maxd;
@@ -948,14 +986,15 @@ static void launch_fx(Ui *ui, float t, uint32_t now)
         }
         {
             float go = smooth((t - 0.55f) / 0.3f), lift = smooth((t - 0.42f) / 0.13f);
-            float ang = t < 0.42f ? 0 : 0.35f * smooth((t - 0.42f) / 0.13f) +
-                        6.2832f * 1.6f * (t > 0.55f ? (t - 0.55f) * (t - 0.55f) / 0.1225f : 0);
+            float ang = t > 0.55f ? 6.2832f * 1.6f * (t - 0.55f) * (t - 0.55f) / 0.1225f : 0;
             float press = t < 0.08f ? sinf(t / 0.08f * 3.1416f) : 0;     /* проседание под пальцем */
             float ccx = cx + ((float)ui->W / 2 - cx) * go;
             float ccy = cy - lift * (float)bh * 0.06f + ((float)ui->H / 2 - cy) * go + press * 3;
             float k = (1 - 0.05f * press) * (1 + 0.45f * go), cs = cosf(ang);
             float dis = smooth((t - 0.72f) / 0.18f), glow = smooth((t - 0.1f) / 0.3f) * (1 - dis);
-            int ww = (int)((float)bw * k * fabsf(cs)), hh = (int)((float)bh * k), x0, y0, i, j;
+            /* перспектива: край, что «ближе», выше дальнего — так поворот читается как объём */
+            float persp = 0.22f * sinf(ang);
+            int ww = (int)((float)bw * k * fabsf(cs)), hh = (int)((float)bh * k), x0, i, j;
             /* ореол: мягкое свечение за коробкой */
             if (glow > 0) {
                 int rmax = (int)((float)imax(bw, bh) * k * 0.9f), r;
@@ -970,16 +1009,17 @@ static void launch_fx(Ui *ui, float t, uint32_t now)
                 }
             }
             x0 = (int)(ccx - (float)ww / 2);
-            y0 = (int)(ccy - (float)hh / 2);
             fx_seed = (uint32_t)(now / 40);
-            for (j = 0; j < hh && ww > 0; j++) {
-                int py = y0 + j, sy2 = by + j * bh / hh;
-                if (py < 0 || py >= ui->H || sy2 < 0 || sy2 >= ui->H)
+            for (i = 0; i < ww; i++) {
+                int px = x0 + i, sx2 = cs >= 0 ? bx + i * bw / ww : bx + bw - 1 - i * bw / ww;
+                float colk = 1 + persp * ((float)i / (float)ww - 0.5f) * 2;
+                int ch = (int)((float)hh * colk), cy0 = (int)(ccy - (float)ch / 2);
+                if (px < 0 || px >= ui->W || sx2 < 0 || sx2 >= ui->W || ch < 1)
                     continue;
-                for (i = 0; i < ww; i++) {
-                    int px = x0 + i, sx2 = cs >= 0 ? bx + i * bw / ww : bx + bw - 1 - i * bw / ww;
+                for (j = 0; j < ch; j++) {
+                    int py = cy0 + j, sy2 = by + j * bh / ch;
                     uint32_t c;
-                    if (px < 0 || px >= ui->W || sx2 < 0 || sx2 >= ui->W)
+                    if (py < 0 || py >= ui->H || sy2 < 0 || sy2 >= ui->H)
                         continue;
                     c = src->px[sy2 * ui->W + sx2];
                     if ((float)bayer[(py & 3) * 4 + (px & 3)] / 16.0f < dis) {
@@ -1129,8 +1169,13 @@ static void toggle_setting(Ui *ui, int which)
         ui->set.dark = !ui->set.dark;
     else if (which == SET_PIXELS)
         ui->set.big_pixels = !ui->set.big_pixels;
-    else
+    else if (which == SET_SHARP)
         ui->set.sharp = !ui->set.sharp;
+    else {
+        ui->set.sound = !ui->set.sound;
+        if (!ui->cli_mute)
+            audio_set_master(ui->set.sound ? 100 : 0);
+    }
     settings_save(ui);
     layout(ui);
 }
@@ -1561,8 +1606,10 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
 
     memset(&ui, 0, sizeof(ui));
     ui.cli_scale = cfg->scale;
+    ui.cli_mute = cfg->mute;
     ui.tab = TAB_PLAY;
     settings_load(&ui);
+    audio_set_master(ui.cli_mute || !ui.set.sound ? 0 : 100);
     {   /* вид анимации запуска; BT_LAUNCH_ANIM — посмотреть другие */
         const char *e = getenv("BT_LAUNCH_ANIM");
         ui.fx = e ? atoi(e) % FX_COUNT : FX_SHATTER;

@@ -50,6 +50,7 @@ typedef struct {
     int         software;       /* программный рендер для старых видеокарт */
     const char *title;
     int         touch;          /* сенсорные кнопки поверх игры (на Android — всегда) */
+    int         mute;           /* --mute: без звука, что бы ни стояло в настройках */
 } PlatformConfig;
 
 int      platform_init(const PlatformConfig *cfg);

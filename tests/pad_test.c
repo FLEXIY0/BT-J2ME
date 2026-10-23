@@ -46,7 +46,7 @@ static void expect_none(const char *what)
 
 int main(void)
 {
-    PlatformConfig cfg = { 240, 320, 0, SCALE_AUTO, 1, "pad-test", 0 };
+    PlatformConfig cfg = { 240, 320, 0, SCALE_AUTO, 1, "pad-test", 0, 0 };
     SDL_VirtualJoystickDesc desc;
     SDL_Joystick *joy;
     int idx;

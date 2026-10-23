@@ -212,6 +212,7 @@ static int parse_opts(int argc, char **argv, int start, PlatformConfig *cfg)
         } else if (strcmp(argv[i], "--touch") == 0) {
             cfg->touch = 1;
         } else if (strcmp(argv[i], "--mute") == 0) {
+            cfg->mute = 1;
             audio_set_master(0);
         } else {
             BT_LOG("неизвестная опция: %s\n", argv[i]);
@@ -283,7 +284,7 @@ static int is_dir(const char *path)
 
 int main(int argc, char **argv)
 {
-    PlatformConfig cfg = { 240, 320, 1, SCALE_AUTO, 1, "BT-J2ME", 0 };
+    PlatformConfig cfg = { 240, 320, 1, SCALE_AUTO, 1, "BT-J2ME", 0, 0 };
     char dir[1024];
 
 #ifdef __ANDROID__
