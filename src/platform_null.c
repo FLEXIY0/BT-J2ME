@@ -72,3 +72,5 @@ int platform_can_import(void) { return 0; }
 void platform_import_games(void) {}
 void platform_text_input(int on) { (void)on; }
 void platform_vibrate(int ms) { (void)ms; }
+int platform_open_url(const char *url) { (void)url; return 0; }
+int platform_touch_wide(void) { return 0; }

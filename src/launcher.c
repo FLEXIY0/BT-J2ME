@@ -495,6 +495,54 @@ static void draw_counter(Ui *ui, int cur, int total)
 
 static void draw_add_tile(Ui *ui, int x, int y, int w, int h);
 
+static float ease_out(float t) { t = clampf(t, 0, 1); return 1 - (1 - t) * (1 - t); }
+
+/* Анимация запуска выбранной коробки (вариант — BT_LAUNCH_ANIM, пока выбираем лучший):
+ * 0 — диск выезжает вбок, 1 — диск поднимается из коробки, 2 — коробка раскрывается,
+ * 3 — коробка наезжает на камеру. Возвращает 1, если коробку уже нарисовала сама. */
+static int launch_anim(Ui *ui, int x, int y, int w, int h, float launch, uint32_t now)
+{
+    static int style = -1;
+    Image *s = ui->scr;
+    Game *g = &ui->lib.games[ui->sel];
+    float out = ease_out(launch / 0.3f), spin = (float)(now - ui->launch_t0) / 1000.0f * (0.5f + launch * 4);
+    int r = w * 46 / 100;
+
+    if (style < 0) {
+        const char *e = getenv("BT_LAUNCH_ANIM");
+        style = e ? atoi(e) : 0;
+    }
+    switch (style) {
+    case 1: {   /* диск поднимается над коробкой и крутится */
+        float up = ease_out(launch / 0.35f);
+        gfx_disc(s, x + w / 2, y + h / 2 - (int)(up * (float)h * 0.62f), r, spin, 255);
+        draw_box(ui, x, y, w, h, g, 0, 0, now);
+        return 1;
+    }
+    case 2: {   /* крышка коробки распахивается влево, диск крутится внутри */
+        int cw = (int)((float)w * (1 - out * 0.88f));
+        rrect(s, x, y, w, h, 2, ui->th->rim);
+        rrect(s, x + 2, y + 2, w - 4, h - 4, 2, ui->th->rim_hi);
+        gfx_disc(s, x + w / 2 + (int)(out * (float)w * 0.06f), y + h / 2, r, spin, 255);
+        if (cw > 2)
+            draw_box(ui, x, y, cw, h, g, 0, 0, now);
+        return 1;
+    }
+    case 3: {   /* коробка едет на камеру */
+        float k = 1 + ease_out(launch / 0.5f) * 0.55f;
+        int nw = (int)((float)w * k), nh = (int)((float)h * k);
+        draw_box(ui, x + (w - nw) / 2, y + (h - nh) / 2, nw, nh, g, 0, 0, now);
+        return 1;
+    }
+    default: {  /* диск выезжает вбок (как было) */
+        int shift = (int)(out * (float)w * 0.2f);
+        gfx_disc(s, x - shift + w / 2 + (int)(out * (float)w * 0.6f), y + h / 2, r, spin, 255);
+        draw_box(ui, x - shift, y, w, h, g, 0, 0, now);
+        return 1;
+    }
+    }
+}
+
 static void draw_play(Ui *ui, uint32_t now)
 {
     Image *s = ui->scr;
@@ -525,19 +573,10 @@ static void draw_play(Ui *ui, uint32_t now)
             box_rect(ui, i, &x, &y, &w, &h, &tilt);
             if (x > ui->W || x + w < 0)
                 continue;
-            if (i == ui->sel) {
-                float out = 0;
-                if (ui->launch_t0) {
-                    out = clampf(launch / 0.3f, 0, 1);
-                    out = 1 - (1 - out) * (1 - out);
-                    x -= (int)(out * (float)w * 0.2f);
-                } else {
-                    y += (int)(1.5f * sinf((float)now / 650.0f));   /* коробка чуть «дышит» */
-                }
-                if (out > 0)   /* диск выезжает из коробки вправо */
-                    gfx_disc(s, x + w / 2 + (int)(out * (float)w * 0.6f), y + h / 2, w * 46 / 100,
-                             (float)(now - ui->launch_t0) / 1000.0f * (0.5f + launch * 4), 255);
-            }
+            if (i == ui->sel && ui->launch_t0 && launch_anim(ui, x, y, w, h, launch, now))
+                continue;
+            if (i == ui->sel && !ui->launch_t0)
+                y += (int)(1.5f * sinf((float)now / 650.0f));   /* коробка чуть «дышит» */
             draw_box(ui, x, y, w, h, &ui->lib.games[i], tilt, dist >= 2 ? 60 : 0, now);
         }
     }

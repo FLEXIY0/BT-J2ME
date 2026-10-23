@@ -15,11 +15,13 @@
 #define TEX_CACHE   96
 
 enum { E_KEY, E_STICK, E_PAD, E_MENU };
-enum { F_NONE, F_KEY, F_PANEL, F_STICK, F_POINTER, F_EDIT_DRAG, F_EDIT_UI };
+enum { F_NONE, F_KEY, F_PANEL, F_STICK, F_POINTER, F_EDIT_DRAG, F_EDIT_UI, F_KBD };
+enum { P_NONE, P_KEYPAD, P_KEYBOARD };
 
 /* Подписи, которых нет среди кодов клавиш */
 enum { L_PAD = 1000, L_MENU, L_STICK, L_KNOB, L_PLUS, L_MINUS, L_EYE, L_CHECK, L_RESET, L_TRASH,
-       L_SIZE, L_WAY4, L_WAY8 };
+       L_SIZE, L_WAY4, L_WAY8, L_WIDE, L_TALL, L_SHIFT, L_SHIFT_ON, L_BKSP, L_123, L_ABC, L_RU, L_EN, L_SPACE, L_ENTER, L_DOT,
+       L_CHAR = 2000 /* + код символа */ };
 enum { S_NORMAL, S_PRESSED, S_CHIP, S_CHIP_ON };
 
 typedef struct {
@@ -44,7 +46,7 @@ typedef struct {
 } Tex;
 
 /* Пункт редактора: действие и прямоугольник */
-enum { A_OP_MINUS, A_OP_PLUS, A_WAY, A_RESET, A_DONE, A_SIZE_MINUS, A_SIZE_PLUS, A_DELETE, A_ADD };
+enum { A_OP_MINUS, A_OP_PLUS, A_WAY, A_WIDE, A_RESET, A_DONE, A_SIZE_MINUS, A_SIZE_PLUS, A_DELETE, A_ADD };
 typedef struct {
     int      action, arg, label;
     SDL_Rect r;
@@ -58,12 +60,16 @@ static struct {
     char          id[256];
     Layout        lay[2];       /* 0 — портрет, 1 — альбом */
     float         opacity;
-    int           four_way;
+    int           four_way, wide, wide_saved, restart;
     int           W, H, gw, gh;
     SDL_Rect      g;            /* где картинка игры */
     Finger        f[MAX_FINGERS];
     int           keycount[KEY_SLOTS];
-    int           pad_open, ptr_down;
+    int           panel, last_panel, ptr_down;   /* открытая панель: цифры или клавиатура */
+    int           kb_en, kb_shift, text_mode, kb_auto, kb_down;
+    struct { int key, taps; } mt[64];                /* очередь мультитапа: буквы → нажатия цифр */
+    int           mt_head, mt_len, mt_phase, mt_done, mt_last_key;
+    uint32_t      mt_next, mt_last_end;
     int           stick_on;
     float         sox, soy, skx, sky;
     int           sdir[4];
@@ -207,6 +213,7 @@ static void profile_load(void)
 
     T.opacity = 0.6f;
     T.four_way = 0;
+    T.wide = 0;
     memset(T.lay, 0, sizeof(T.lay));
     profile_path(path, sizeof(path), 0);
     if (!(f = bt_fopen(path, "r")))
@@ -219,6 +226,8 @@ static void profile_load(void)
             T.opacity = clampf(v, 0.15f, 1);
         else if (sscanf(line, "fourway %d", &n) == 1)
             T.four_way = n != 0;
+        else if (sscanf(line, "wide %d", &n) == 1)
+            T.wide = n != 0;
         else if (sscanf(line, "layout %d", &n) == 1 && (n == 0 || n == 1)) {
             o = n;
             T.lay[o].valid = 1;
@@ -239,7 +248,7 @@ static void profile_save(void)
     profile_path(path, sizeof(path), 1);
     if (!(f = bt_fopen(path, "w")))
         return;
-    fprintf(f, "opacity %.2f\nfourway %d\n", T.opacity, T.four_way);
+    fprintf(f, "opacity %.2f\nfourway %d\nwide %d\n", T.opacity, T.four_way, T.wide);
     for (o = 0; o < 2; o++) {
         if (!T.lay[o].valid)
             continue;
@@ -392,6 +401,25 @@ static void draw_label(Image *im, int label, int w, int h, uint32_t c)
     case L_RESET: ICON(ic_reset, 0); break;
     case L_TRASH: ICON(ic_trash, 0); break;
     case L_SIZE:  ICON(ic_size, 0); break;
+    case L_SHIFT: case L_SHIFT_ON:
+        ICON(ic_arrow, 0);
+        if (label == L_SHIFT_ON)
+            shape(im, w * 0.3f, h * 0.78f, w * 0.4f, h * 0.07f, 1, c, 0, 0);
+        break;
+    case L_BKSP:  ICON(ic_arrow, 3); break;
+    case L_WIDE:  /* экран под телефон — широкий прямоугольник */
+        shape(im, w * 0.18f, h * 0.32f, w * 0.64f, h * 0.36f, m * 0.05f, 0, c, m * 0.06f);
+        break;
+    case L_TALL:  /* экран как задумано — узкий «телефонный» */
+        shape(im, w * 0.33f, h * 0.2f, w * 0.34f, h * 0.6f, m * 0.05f, 0, c, m * 0.06f);
+        break;
+    case L_ENTER: ICON(ic_check, 0); break;
+    case L_SPACE: shape(im, w * 0.2f, h * 0.62f, w * 0.6f, h * 0.08f, 1, c, 0, 0); break;
+    case L_123:   text_center(im, "123", cx, cy, m * 8 / 10, c); break;
+    case L_ABC:   text_center(im, "АБВ", cx, cy, m * 8 / 10, c); break;
+    case L_RU:    text_center(im, "RU", cx, cy, m * 8 / 10, c); break;
+    case L_EN:    text_center(im, "EN", cx, cy, m * 8 / 10, c); break;
+    case L_DOT:   text_center(im, ".", cx, cy, m, c); break;
     case L_STICK: case L_WAY4: case L_WAY8:
         shape(im, w * 0.2f, h * 0.2f, w * 0.6f, h * 0.6f, (float)w, 0, c, m * 0.06f);
         shape(im, w * 0.38f, h * 0.38f, w * 0.24f, h * 0.24f, (float)w, c, 0, 0);
@@ -399,7 +427,19 @@ static void draw_label(Image *im, int label, int w, int h, uint32_t c)
             text_center(im, label == L_WAY4 ? "4" : "8", w * 3 / 4, h * 3 / 4, m * 6 / 10, c);
         break;
     default:
-        if (label >= KEY_NUM0 && label <= KEY_NUM9) {
+        if (label >= L_CHAR) {      /* буква клавиатуры */
+            int cp = label - L_CHAR;
+            char u[4];
+            if (cp < 0x80) {
+                u[0] = (char)cp;
+                u[1] = '\0';
+            } else {
+                u[0] = (char)(0xC0 | (cp >> 6));
+                u[1] = (char)(0x80 | (cp & 0x3F));
+                u[2] = '\0';
+            }
+            text_center(im, u, cx, cy, m, c);
+        } else if (label >= KEY_NUM0 && label <= KEY_NUM9) {
             buf[0] = (char)label;
             buf[1] = '\0';
             text_center(im, buf, cx, cy, m, c);
@@ -524,29 +564,287 @@ static void release_all(void)
     T.stick_on = 0;
 }
 
-/* ---------- цифровая панель ---------- */
+/* ---------- панели: цифры и клавиатура ---------- */
+
+/* Пункт панели: клавиша телефона, символ (для полей ввода и мультитапа) или служебная кнопка. */
+enum { PI_KEY, PI_CHAR, PI_SHIFT, PI_BKSP, PI_TO_KBD, PI_TO_PAD, PI_LANG, PI_SPACE, PI_ENTER };
+typedef struct {
+    int      kind, val, label;
+    SDL_Rect r;
+} PItem;
 
 static const int pad_keys[12] = { '1', '2', '3', '4', '5', '6', '7', '8', '9', KEY_STAR, '0', KEY_POUND };
 
-static SDL_Rect pad_rect(int i)
-{
-    float u = unit(), b = 13 * u, gap = 2 * u, cx, cy;
-    SDL_Rect r;
+/* Рус. и лат. раскладки; буквы — в UTF-8, по строкам */
+static const char *const kb_ru[3] = { "йцукенгшщзх", "фывапролджэ", "ячсмитьбю" };
+static const char *const kb_en[3] = { "qwertyuiop", "asdfghjkl", "zxcvbnm" };
 
-    if (!land()) {
-        float z0 = (float)(T.g.y + T.g.h);
-        cx = T.W / 2.0f;
-        cy = z0 + (T.H - z0) * 0.5f;
-        if (T.H - z0 < T.H * 0.3f)
-            cy = T.H * 0.75f;
-    } else {
-        cx = T.W / 2.0f;
-        cy = T.H - (b * 4 + gap * 3) / 2 - 2 * u;
+/* Мультитап как на кнопочных телефонах (E.161 и русская раскладка Nokia). */
+static const char *const mt_en[10] = { " ", ".,?!1", "abc", "def", "ghi", "jkl", "mno", "pqrs", "tuv", "wxyz" };
+static const char *const mt_ru[10] = { " ", ".,?!1", "абвг", "деёжз", "ийкл", "мноп", "рсту", "фхцч", "шщъы", "ьэюя" };
+
+static int utf8_next(const char **p)
+{
+    const unsigned char *u = (const unsigned char *)*p;
+    int c = u[0], n = 1;
+
+    if ((c & 0xE0) == 0xC0 && u[1]) {
+        c = ((c & 0x1F) << 6) | (u[1] & 0x3F);
+        n = 2;
+    } else if ((c & 0xF0) == 0xE0 && u[1] && u[2]) {
+        c = ((c & 0x0F) << 12) | ((u[1] & 0x3F) << 6) | (u[2] & 0x3F);
+        n = 3;
     }
-    r.w = r.h = (int)b;
-    r.x = (int)(cx - (b * 3 + gap * 2) / 2 + (float)(i % 3) * (b + gap));
-    r.y = (int)(cy - (b * 4 + gap * 3) / 2 + (float)(i / 3) * (b + gap));
-    return r;
+    *p += n;
+    return c;
+}
+
+static int lower(int c)
+{
+    if ((c >= 'A' && c <= 'Z') || (c >= 0x410 && c <= 0x42F))
+        return c + 32;
+    return c == 0x401 ? 0x451 : c;
+}
+
+static int upper(int c)
+{
+    if ((c >= 'a' && c <= 'z') || (c >= 0x430 && c <= 0x44F))
+        return c - 32;
+    return c == 0x451 ? 0x401 : c;
+}
+
+/* Зона панели: в портрете — между софт-клавишами и ⌨, в альбоме — нижняя половина экрана. */
+static SDL_Rect panel_zone(void)
+{
+    Layout *L = cur();
+    float u = unit(), top = (float)(T.g.y + T.g.h), bottom = (float)T.H - u;
+    SDL_Rect z;
+    int i;
+
+    if (land() || T.H - top < T.H * 0.3f)
+        top = T.H * (land() ? 0.42f : 0.55f);
+    for (i = 0; i < L->n; i++) {
+        SDL_Rect r = elem_rect(&L->e[i]);
+        int soft = L->e[i].type == E_KEY && (L->e[i].key == KEY_SOFT_LEFT || L->e[i].key == KEY_SOFT_RIGHT);
+        if ((soft || L->e[i].type == E_MENU) && r.y + r.h > top && r.y < top + (bottom - top) / 3)
+            top = (float)(r.y + r.h);
+        if (L->e[i].type == E_PAD && r.y < bottom && r.y > top + (bottom - top) / 2)
+            bottom = (float)r.y;
+    }
+    z.x = (int)u;
+    z.w = T.W - 2 * (int)u;
+    z.y = (int)(top + u);
+    z.h = (int)(bottom - top - 2 * u);
+    return z;
+}
+
+static int panel_items(PItem *it)
+{
+    SDL_Rect z = panel_zone();
+    float u = unit(), gap = 1.5f * u;
+    int n = 0, i, row;
+
+    if (T.panel == P_KEYPAD) {
+        /* 1–9, *, 0, # и переход на буквы — 3×5 */
+        float b = (float)z.h / 5 - gap, bw;
+        if (b > 15 * u)
+            b = 15 * u;
+        bw = b * 1.35f;
+        for (i = 0; i < 13; i++) {
+            it[n].kind = i < 12 ? PI_KEY : PI_TO_KBD;
+            it[n].val = i < 12 ? pad_keys[i] : 0;
+            it[n].label = i < 12 ? pad_keys[i] : L_ABC;
+            it[n].r.w = (int)bw;
+            it[n].r.h = (int)b;
+            it[n].r.x = (int)((float)z.x + (float)z.w / 2 - (bw * 3 + gap * 2) / 2 + (float)(i % 3) * (bw + gap));
+            it[n].r.y = (int)((float)z.y + (float)z.h / 2 - (b * 5 + gap * 4) / 2 + (float)(i / 3) * (b + gap));
+            n++;
+        }
+        return n;
+    }
+    {
+        /* клавиатура: три ряда букв, внизу 123 / язык / пробел / точка / ввод */
+        const char *const *rows = T.kb_en ? kb_en : kb_ru;
+        float kw = (float)z.w / 11, kh = (float)z.h / 4;
+        if (kh > kw * 1.4f)
+            kh = kw * 1.4f;
+        for (row = 0; row < 3; row++) {
+            const char *p = rows[row];
+            int cnt = 0, c;
+            float x0;
+            const char *q = p;
+            while (*q) {
+                utf8_next(&q);
+                cnt++;
+            }
+            if (row == 2)
+                cnt += 2;               /* ⇧ и ⌫ по краям */
+            x0 = (float)z.x + ((float)z.w - kw * (float)cnt) / 2;
+            if (row == 2) {
+                it[n].kind = PI_SHIFT;
+                it[n].label = T.kb_shift ? L_SHIFT_ON : L_SHIFT;
+                it[n].r.x = (int)x0; it[n].r.y = (int)((float)z.y + kh * row); it[n].r.w = (int)(kw - gap); it[n].r.h = (int)(kh - gap);
+                n++;
+                x0 += kw;
+            }
+            while (*p) {
+                c = utf8_next(&p);
+                if (T.kb_shift)
+                    c = upper(c);
+                it[n].kind = PI_CHAR;
+                it[n].val = c;
+                it[n].label = L_CHAR + c;
+                it[n].r.x = (int)x0; it[n].r.y = (int)((float)z.y + kh * row); it[n].r.w = (int)(kw - gap); it[n].r.h = (int)(kh - gap);
+                n++;
+                x0 += kw;
+            }
+            if (row == 2) {
+                it[n].kind = PI_BKSP;
+                it[n].label = L_BKSP;
+                it[n].r.x = (int)x0; it[n].r.y = (int)((float)z.y + kh * row); it[n].r.w = (int)(kw - gap); it[n].r.h = (int)(kh - gap);
+                n++;
+            }
+        }
+        {
+            static const int kinds[5] = { PI_TO_PAD, PI_LANG, PI_SPACE, PI_CHAR, PI_ENTER };
+            static const float widths[5] = { 1.6f, 1.6f, 4.6f, 1.2f, 2.0f };
+            float x0 = (float)z.x, y = (float)z.y + kh * 3;
+            for (i = 0; i < 5; i++) {
+                it[n].kind = kinds[i];
+                it[n].val = kinds[i] == PI_CHAR ? '.' : 0;
+                it[n].label = i == 0 ? L_123 : i == 1 ? (T.kb_en ? L_RU : L_EN) : i == 2 ? L_SPACE : i == 3 ? L_DOT : L_ENTER;
+                it[n].r.x = (int)x0; it[n].r.y = (int)y; it[n].r.w = (int)(kw * widths[i] - gap); it[n].r.h = (int)(kh - gap);
+                x0 += kw * widths[i];
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
+/* ---------- мультитап: буква → несколько нажатий цифры ---------- */
+
+static void mt_push(int key, int taps)
+{
+    if (T.mt_len == (int)(sizeof(T.mt) / sizeof(T.mt[0])))
+        return;
+    T.mt[(T.mt_head + T.mt_len) % 64].key = key;
+    T.mt[(T.mt_head + T.mt_len) % 64].taps = taps;
+    T.mt_len++;
+}
+
+static void mt_letter(int c)
+{
+    int d, k;
+
+    c = lower(c);
+    for (d = 0; d < 10; d++) {
+        const char *tabs[2] = { mt_en[d], mt_ru[d] };
+        for (k = 0; k < 2; k++) {
+            const char *p = tabs[k];
+            int i = 1;
+            while (*p) {
+                if (utf8_next(&p) == c) {
+                    mt_push('0' + d, i);
+                    return;
+                }
+                i++;
+            }
+        }
+    }
+}
+
+static void emit_raw(EventType type, int key)
+{
+    T.emit(type, key, 0, 0);
+}
+
+/* Зовётся из platform_poll: нажатия очереди мультитапа по времени. */
+void touch_tick(uint32_t now)
+{
+    int key;
+
+    if (!T.mt_len || (int32_t)(now - T.mt_next) < 0)
+        return;
+    key = T.mt[T.mt_head].key;
+    if (T.mt_phase) {
+        emit_raw(EV_KEY_UP, key);
+        T.mt_phase = 0;
+        if (++T.mt_done >= T.mt[T.mt_head].taps) {
+            T.mt_head = (T.mt_head + 1) % 64;
+            T.mt_len--;
+            T.mt_done = 0;
+            T.mt_last_key = key;
+            T.mt_last_end = now;
+            T.mt_next = now + 250;      /* следующая буква на другой цифре */
+            return;
+        }
+        T.mt_next = now + 160;          /* пауза между нажатиями одной буквы */
+        return;
+    }
+    /* та же цифра у следующей буквы — ждём, пока телефон «примет» прошлую */
+    if (T.mt_done == 0 && key == T.mt_last_key && now - T.mt_last_end < 1500) {
+        T.mt_next = T.mt_last_end + 1500;
+        return;
+    }
+    emit_raw(EV_KEY_DOWN, key);
+    T.mt_phase = 1;
+    T.mt_next = now + 150;              /* игры опрашивают клавиши раз в кадр — держим подольше */
+}
+
+static void kb_action(const PItem *p)
+{
+    switch (p->kind) {
+    case PI_CHAR:
+        if (T.text_mode)
+            T.emit(EV_CHAR, p->val, 0, 0);
+        else
+            mt_letter(p->val);
+        if (T.kb_shift == 1)
+            T.kb_shift = 0;
+        break;
+    case PI_SPACE:
+        if (T.text_mode)
+            T.emit(EV_CHAR, ' ', 0, 0);
+        else
+            mt_push('0', 1);
+        break;
+    case PI_BKSP:   /* через очередь: нажатие держится, как пальцем, — мгновенное игры не замечают */
+        mt_push(KEY_CLEAR, 1);
+        break;
+    case PI_ENTER:
+        mt_push(KEY_FIRE, 1);
+        break;
+    case PI_SHIFT:  T.kb_shift = !T.kb_shift; break;
+    case PI_LANG:   T.kb_en = !T.kb_en; break;
+    case PI_TO_KBD: T.panel = T.last_panel = P_KEYBOARD; break;
+    case PI_TO_PAD: T.panel = T.last_panel = P_KEYPAD; break;
+    }
+    vibrate();
+    T.dirty = 1;
+}
+
+/* Пока открыта панель, остаются только софт-клавиши, ⚙ и ⌨ — без наложений. */
+static int elem_visible(const Elem *e)
+{
+    if (!T.panel || T.edit)
+        return 1;
+    return e->type == E_MENU || e->type == E_PAD ||
+           (e->type == E_KEY && (e->key == KEY_SOFT_LEFT || e->key == KEY_SOFT_RIGHT));
+}
+
+/* Игра показала поле ввода (TextBox) — клавиатура выезжает сама и печатает символами. */
+void touch_text_input(int on)
+{
+    T.text_mode = on;
+    if (on && T.panel != P_KEYBOARD) {
+        T.panel = P_KEYBOARD;
+        T.kb_auto = 1;
+    } else if (!on && T.kb_auto) {
+        T.panel = P_NONE;
+        T.kb_auto = 0;
+    }
+    T.dirty = 1;
 }
 
 /* ---------- попадания ---------- */
@@ -563,7 +861,8 @@ static int hit_elem(float x, float y, int with_stick)
 
     for (i = L->n - 1; i >= 0; i--) {
         SDL_Rect r = elem_rect(&L->e[i]);
-        if ((L->e[i].type != E_STICK || with_stick) && inside(r, x, y, r.w * 0.12f + unit()))
+        if ((L->e[i].type != E_STICK || with_stick) && elem_visible(&L->e[i]) &&
+            inside(r, x, y, r.w * 0.12f + unit()))
             return i;
     }
     return -1;
@@ -587,7 +886,7 @@ static int in_stick_zone(float x, float y)
     SDL_Rect r;
     float ext;
 
-    if (i < 0)
+    if (i < 0 || T.panel)
         return 0;
     r = elem_rect(&cur()->e[i]);
     ext = r.w * 0.45f;
@@ -682,14 +981,15 @@ static int editor_items(Item *it, int cap, SDL_Rect *panel)
 {
     float u = unit();
     int b = (int)(11 * u), gap = (int)(2 * u) + 1, x = gap, y = gap, n = 0, i;
-    int row1[5][3] = { { A_OP_MINUS, 0, L_MINUS }, { A_OP_PLUS, 0, L_PLUS }, { A_WAY, 0, 0 },
-                       { A_RESET, 0, L_RESET }, { A_DONE, 0, L_CHECK } };
+    int row1[6][3] = { { A_OP_MINUS, 0, L_MINUS }, { A_OP_PLUS, 0, L_PLUS }, { A_WAY, 0, 0 },
+                       { A_WIDE, 0, 0 }, { A_RESET, 0, L_RESET }, { A_DONE, 0, L_CHECK } };
 
 #define PUT(a, g, l) do { if (x + b > T.W - gap && x > gap) { x = gap; y += b + gap; } \
         if (n < cap) { it[n].action = (a); it[n].arg = (g); it[n].label = (l); \
         it[n].r.x = x; it[n].r.y = y; it[n].r.w = it[n].r.h = b; n++; } x += b + gap; } while (0)
-    for (i = 0; i < 5; i++) {
-        PUT(row1[i][0], 0, row1[i][0] == A_WAY ? (T.four_way ? L_WAY4 : L_WAY8) : row1[i][2]);
+    for (i = 0; i < 6; i++) {
+        PUT(row1[i][0], 0, row1[i][0] == A_WAY ? (T.four_way ? L_WAY4 : L_WAY8) :
+                           row1[i][0] == A_WIDE ? (T.wide ? L_WIDE : L_TALL) : row1[i][2]);
         if (i == 1)
             x += gap * 2;
     }
@@ -726,6 +1026,7 @@ static void editor_action(const Item *it)
     case A_OP_MINUS: T.opacity = clampf(T.opacity - 0.1f, 0.15f, 1); break;
     case A_OP_PLUS:  T.opacity = clampf(T.opacity + 0.1f, 0.15f, 1); break;
     case A_WAY:      T.four_way = !T.four_way; break;
+    case A_WIDE:     T.wide = !T.wide; break;     /* экран игры: как задумано или под телефон */
     case A_RESET:
         default_layout(land());
         T.opacity = 0.6f;
@@ -733,10 +1034,12 @@ static void editor_action(const Item *it)
         T.sel = -1;
         break;
     case A_DONE:
-        L->valid = 1;
         profile_save();
         T.edit = 0;
         T.sel = -1;
+        if (T.wide != T.wide_saved)     /* размер экрана игра узнаёт только при запуске */
+            T.restart = 1;
+        T.wide_saved = T.wide;
         break;
     case A_SIZE_MINUS: case A_SIZE_PLUS:
         if (T.sel >= 0)
@@ -757,7 +1060,9 @@ static void editor_action(const Item *it)
         T.sel = L->n - 1;
         break;
     }
-    L->valid = 1;   /* раскладка тронута — дальше она своя, а не «по умолчанию» */
+    /* кнопки двигали, добавляли или удаляли — дальше раскладка своя, а не «по умолчанию» */
+    if (it->action >= A_SIZE_MINUS)
+        L->valid = 1;
     T.dirty = 1;
 }
 
@@ -824,14 +1129,23 @@ static void down(Finger *f, float x, float y)
         edit_down(f, x, y);
         return;
     }
-    if (T.pad_open)
-        for (i = 0; i < 12; i++)
-            if (inside(pad_rect(i), x, y, unit())) {
-                f->kind = F_PANEL;
-                f->key = pad_keys[i];
-                press(f->key);
+    if (T.panel) {
+        PItem it[64];
+        int n = panel_items(it);
+        for (i = 0; i < n; i++)
+            if (inside(it[i].r, x, y, unit() * 0.4f)) {
+                if (it[i].kind == PI_KEY) {
+                    f->kind = F_PANEL;
+                    f->key = it[i].val;
+                    press(f->key);
+                } else {
+                    f->kind = F_KBD;
+                    T.kb_down = i;
+                    kb_action(&it[i]);
+                }
                 return;
             }
+    }
     if ((i = hit_elem(x, y, 0)) >= 0) {
         Elem *e = &cur()->e[i];
         if (e->type == E_KEY) {
@@ -840,13 +1154,16 @@ static void down(Finger *f, float x, float y)
             f->key = e->key;
             press(e->key);
         } else if (e->type == E_PAD) {
-            T.pad_open = !T.pad_open;
+            T.panel = T.panel ? P_NONE : (T.last_panel ? T.last_panel : P_KEYPAD);
+            T.kb_auto = 0;
+            if (T.panel)
+                stick_end();
             vibrate();
         } else if (e->type == E_MENU) {
             release_all();
             T.edit = 1;
             T.sel = -1;
-            T.pad_open = 0;
+            T.panel = P_NONE;
         }
         T.dirty = 1;
         return;
@@ -907,6 +1224,7 @@ static void up(Finger *f, float x, float y)
     switch (f->kind) {
     case F_STICK:   stick_end(); break;
     case F_KEY: case F_PANEL: release(f->key); break;
+    case F_KBD: T.kb_down = -1; T.dirty = 1; break;
     case F_POINTER:
         to_game(x, y, &gx, &gy);
         T.emit(EV_POINTER_UP, 0, gx, gy);
@@ -968,6 +1286,12 @@ void touch_place(int W, int H, int gw, int gh, ScaleMode mode, SDL_Rect *d)
     d->h = (int)((float)gh * k);
     d->x = (W - d->w) / 2;
     d->y = T.game && portrait ? 0 : (H - d->h) / 2;
+    if (d->x != T.g.x || d->y != T.g.y || d->w != T.g.w || d->h != T.g.h) {
+        /* картинка игры сменила размер — раскладку по умолчанию строим заново под неё */
+        T.lay[0].n = T.lay[0].valid ? T.lay[0].n : 0;
+        T.lay[1].n = T.lay[1].valid ? T.lay[1].n : 0;
+        T.dirty = 1;
+    }
     T.g = *d;
     T.gw = gw;
     T.gh = gh;
@@ -993,6 +1317,8 @@ void touch_draw(void)
     for (i = 0; i < L->n; i++) {
         const Elem *e = &L->e[i];
         SDL_Rect r = elem_rect(e);
+        if (!elem_visible(e))
+            continue;
         if (e->type == E_STICK) {
             if (T.stick_on && !T.edit) {
                 SDL_Rect b = r, k;
@@ -1014,7 +1340,7 @@ void touch_draw(void)
         } else {
             int label = e->type == E_PAD ? L_PAD : e->type == E_MENU ? L_MENU : e->key;
             int pressed = e->type == E_KEY && T.keycount[e->key + 16 < 0 ? 0 : e->key + 16] > 0;
-            if (e->type == E_PAD && T.pad_open)
+            if (e->type == E_PAD && T.panel)
                 pressed = 1;
             blit(label, r, pressed ? S_PRESSED : S_NORMAL, a);
         }
@@ -1028,10 +1354,14 @@ void touch_draw(void)
             }
         }
     }
-    if (T.pad_open && !T.edit)
-        for (i = 0; i < 12; i++)
-            blit(pad_keys[i], pad_rect(i), T.keycount[pad_keys[i] + 16] ? S_PRESSED : S_NORMAL,
-                 T.opacity + 0.2f);
+    if (T.panel && !T.edit) {
+        PItem it[64];
+        int n = panel_items(it);
+        for (i = 0; i < n; i++) {
+            int on = it[i].kind == PI_KEY ? T.keycount[it[i].val + 16] > 0 : i == T.kb_down;
+            blit(it[i].label, it[i].r, on ? S_PRESSED : S_NORMAL, T.opacity + 0.25f);
+        }
+    }
     if (T.edit) {
         Item it[48];
         SDL_Rect panel;
@@ -1058,6 +1388,19 @@ int touch_dirty(void)
     return T.dirty;
 }
 
+int touch_wide(void)
+{
+    return T.game && T.wide;
+}
+
+int touch_take_restart(void)
+{
+    int r = T.restart;
+
+    T.restart = 0;
+    return r;
+}
+
 /* ---------- жизненный цикл ---------- */
 
 void touch_init(SDL_Renderer *ren, TouchEmit emit)
@@ -1066,6 +1409,7 @@ void touch_init(SDL_Renderer *ren, TouchEmit emit)
     T.ren = ren;
     T.emit = emit;
     T.sel = -1;
+    T.kb_down = -1;
     T.opacity = 0.6f;
     if (SDL_InitSubSystem(SDL_INIT_HAPTIC) == 0 && SDL_NumHaptics() > 0 && (T.haptic = SDL_HapticOpen(0)) != NULL &&
         SDL_HapticRumbleInit(T.haptic) != 0) {
@@ -1092,12 +1436,17 @@ void touch_profile(const char *game_id)
         return;
     release_all();
     T.edit = 0;
-    T.pad_open = 0;
+    T.panel = P_NONE;
+    T.kb_auto = 0;
+    T.kb_down = -1;
+    T.mt_len = 0;
+    T.mt_phase = 0;
     T.sel = -1;
     T.game = game_id != NULL;
     if (T.game) {
         snprintf(T.id, sizeof(T.id), "%s", game_id);
         profile_load();
+        T.wide_saved = T.wide;
     }
     T.dirty = 1;
 }

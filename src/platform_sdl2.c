@@ -99,11 +99,12 @@ static void open_pad(int index)
 
 static void touch_emit(EventType type, int key, int x, int y)
 {
-    push(type, key);
+    push(type, type == EV_CHAR ? 0 : key);
     if (q_len) {
         Event *e = &queue[(q_head + q_len - 1) % QUEUE_LEN];
         e->x = x;
         e->y = y;
+        e->ch = type == EV_CHAR ? key : 0;
     }
 }
 
@@ -208,6 +209,11 @@ void platform_touch_profile(const char *game_id)
         touch_profile(game_id);
 }
 
+int platform_touch_wide(void)
+{
+    return touch_on && touch_wide();
+}
+
 #ifdef __ANDROID__
 /* Вызов метода MainActivity без аргументов. */
 static void activity_call(const char *method)
@@ -237,20 +243,56 @@ JNIEXPORT void JNICALL Java_ru_flexiy0_btj2me_MainActivity_nativeGamesChanged(JN
     games_changed = 1;
 }
 
+int platform_open_url(const char *url)
+{
+    JNIEnv *env = (JNIEnv *)SDL_AndroidGetJNIEnv();
+    jobject act = (jobject)SDL_AndroidGetActivity();
+    jclass cls;
+    jmethodID m;
+    jstring s;
+    int ok = 0;
+
+    if (!env || !act)
+        return 0;
+    cls = (*env)->GetObjectClass(env, act);
+    m = (*env)->GetMethodID(env, cls, "openUrl", "(Ljava/lang/String;)Z");
+    s = (*env)->NewStringUTF(env, url);
+    if (m && s)
+        ok = (*env)->CallBooleanMethod(env, act, m, s);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        ok = 0;
+    }
+    if (s)
+        (*env)->DeleteLocalRef(env, s);
+    (*env)->DeleteLocalRef(env, cls);
+    (*env)->DeleteLocalRef(env, act);
+    return ok;
+}
+
 int platform_can_import(void) { return 1; }
 void platform_import_games(void) { activity_call("importGames"); }
 
+/* Своя выдвижная клавиатура вместо системной: одинаковая на всех версиях Android. */
 void platform_text_input(int on)
 {
-    if (on)
-        SDL_StartTextInput();
-    else
-        SDL_StopTextInput();
+    touch_text_input(on);
 }
 #else
+/* На ПК игра браузер не открывает — только пишет, куда хотела. */
+int platform_open_url(const char *url)
+{
+    BT_LOG("игра просит открыть %s\n", url);
+    return 0;
+}
+
 int platform_can_import(void) { return 0; }
 void platform_import_games(void) {}
-void platform_text_input(int on) { (void)on; }   /* на ПК ввод текста включён всегда */
+void platform_text_input(int on)
+{
+    if (touch_on)
+        touch_text_input(on);   /* на ПК с --touch — та же клавиатура; обычный ввод с клавиатуры есть всегда */
+}
 #endif
 
 void platform_vibrate(int ms)
@@ -422,6 +464,11 @@ int platform_poll(Event *ev)
     }
     while (!q_len && SDL_PollEvent(&e))
         translate(&e);
+    if (touch_on) {
+        touch_tick(SDL_GetTicks());
+        if (touch_take_restart())
+            push(EV_RESTART, 0);
+    }
     if (touch_on && touch_dirty() && tex)
         render();       /* кнопка нажалась или стик сдвинулся, а игра кадр не прислала */
     if (!q_len)

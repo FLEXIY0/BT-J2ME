@@ -31,7 +31,13 @@ public abstract class MIDlet {
         return Native.getAppProperty(key);
     }
 
+    /* Ссылку открывает браузер телефона (на Android), «tel:»/«sms:» — набор номера или письмо,
+     * отправить их может только сам человек. false — закрывать игру для этого не нужно. */
     public final boolean platformRequest(String url) throws javax.microedition.io.ConnectionNotFoundException {
+        if (url == null || url.length() == 0)
+            return false;
+        if (!btvm.Native.openUrl(url))
+            throw new javax.microedition.io.ConnectionNotFoundException(url);
         return false;
     }
 

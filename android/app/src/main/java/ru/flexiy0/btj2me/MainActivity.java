@@ -45,6 +45,19 @@ public class MainActivity extends SDLActivity {
         handleIntent(intent);
     }
 
+    /* MIDlet.platformRequest: ссылку открывает браузер (sms:/tel: — приложения сообщений и звонков). */
+    public boolean openUrl(String url) {
+        try {
+            Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+            return true;
+        } catch (Exception e) {
+            Log.w(TAG, "не открыть " + url, e);
+            return false;
+        }
+    }
+
     /* Зовётся из C (platform_import_games) в потоке игры. */
     public void importGames() {
         runOnUiThread(new Runnable() {

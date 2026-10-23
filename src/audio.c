@@ -1329,7 +1329,30 @@ static int finish_create(int i, int ok)
     return (s->gen << 8) | (i + 1);
 }
 
+static int snd_create_impl(const uint8_t *data, size_t len, int kind);
+
+/* BT_SOUND_TRACE=1 — печатать, что игра делает со звуком (отладка совместимости) */
+static int trace(void)
+{
+    static int t = -1;
+
+    if (t < 0)
+        t = getenv("BT_SOUND_TRACE") != NULL;
+    return t;
+}
+
 int snd_create(const uint8_t *data, size_t len, int kind)
+{
+    int h = snd_create_impl(data, len, kind);
+    Sound *s = get(h);
+
+    if (trace())
+        BT_LOG("звук %d: создан, %s, %u мс%s\n", h & 0xFF, !s ? "—" : s->kind == K_PCM ? "PCM" : "SEQ",
+               s ? s->dur_us / 1000 : 0, s && s->unknown ? " (формат не знаем)" : "");
+    return h;
+}
+
+static int snd_create_impl(const uint8_t *data, size_t len, int kind)
 {
     int i = alloc_slot(), ok;
     Sound *s;
@@ -1382,6 +1405,8 @@ void snd_free(int h)
 
     if (!s)
         return;
+    if (trace())
+        BT_LOG("звук %d: закрыт%s\n", h & 0xFF, s->playing ? " посреди игры" : "");
     lock();
     release_all((int)(s - A.snd), -1, 10);
     sound_free_slot((int)(s - A.snd));
@@ -1400,6 +1425,8 @@ void snd_play(int h)
     if (!s)
         return;
     ensure_open();
+    if (trace())
+        BT_LOG("звук %d: играть (повторов %d)\n", h & 0xFF, s->loops);
     lock();
     if (!s->playing) {
         if (!A.open && !busy()) {
@@ -1418,6 +1445,8 @@ void snd_pause(int h)
 
     if (!s)
         return;
+    if (trace() && s->playing)
+        BT_LOG("звук %d: остановлен\n", h & 0xFF);
     lock();
     s->playing = 0;
     if (s->kind == K_SEQ)

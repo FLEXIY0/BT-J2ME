@@ -29,5 +29,12 @@ void touch_draw(void);
 /* Кнопки изменились (нажатие, стик, редактор) — кадр надо перерисовать. */
 int  touch_dirty(void);
 void touch_vibrate(int ms);
+/* Очередь мультитапа: зовётся из platform_poll. */
+void touch_tick(uint32_t now);
+/* Игра показала поле ввода: выдвинуть клавиатуру, буквы — символами. */
+void touch_text_input(int on);
+/* Широкоэкранный режим игры и запрос перезапуска после его смены в редакторе. */
+int  touch_wide(void);
+int  touch_take_restart(void);
 
 #endif

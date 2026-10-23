@@ -22,7 +22,8 @@ typedef enum {
     EV_PAD_ADDED,   /* подключён геймпад, name — его название */
     EV_CHAR,        /* набран символ (поля ввода в играх), ch — код */
     EV_QUIT,        /* закрыли окно / F10 */
-    EV_REFRESH      /* в папке игр что-то поменялось (импорт на Android) — пересканировать полку */
+    EV_REFRESH,     /* в папке игр что-то поменялось (импорт на Android) — пересканировать полку */
+    EV_RESTART      /* перезапустить игру (сменили размер экрана в настройках кнопок) */
 } EventType;
 
 typedef struct {
@@ -63,12 +64,16 @@ uint32_t platform_ticks_ms(void);
 void     platform_sleep_ms(uint32_t ms);
 /* Профиль сенсорных кнопок игры (раскладка запоминается для каждой игры); NULL — без кнопок. */
 void     platform_touch_profile(const char *game_id);
+/* Широкоэкранный режим выбран для этой игры (после platform_touch_profile). */
+int      platform_touch_wide(void);
 /* Добавить игры системным выбором файлов (Android); по готовности придёт EV_REFRESH. */
 int      platform_can_import(void);
 void     platform_import_games(void);
 /* Экранная клавиатура для полей ввода в играх (на ПК не нужна — там своя клавиатура). */
 void     platform_text_input(int on);
 void     platform_vibrate(int ms);
+/* Открыть ссылку системным браузером (platformRequest); 0 — не получилось. */
+int      platform_open_url(const char *url);
 
 /* Звук: моно 16 бит. mix зовётся из потока звука и заполняет frames сэмплов.
  * Возвращает настоящую частоту устройства или 0, если звука нет. */

@@ -35,6 +35,7 @@ static struct {
     int       w, h;
     Manifest  mf, jad;
     int       have_mf, have_jad;
+    int       wide, ow, oh;     /* широкоэкранный режим: исходный размер игры */
     char      rms_dir[1024];
     MEvent    q[EVQ_LEN];
     int       q_head, q_len;
@@ -933,6 +934,17 @@ static int n_vibrate(Thread *t, Value *a, Value *r)
     return NATIVE_OK;
 }
 
+static int n_openUrl(Thread *t, Value *a, Value *r)
+{
+    char url[1024];
+
+    (void)t;
+    r->i = 0;
+    if (a[0].l && jvm_string_utf8(a[0].l, url, sizeof(url)) > 0)
+        r->i = platform_open_url(url);
+    return NATIVE_OK;
+}
+
 static const NativeDef midp_natives[] = {
     { "javax/microedition/lcdui/Graphics", "fill0", NULL, g_fill0 },
     { "javax/microedition/lcdui/Graphics", "line0", NULL, g_line0 },
@@ -960,6 +972,7 @@ static const NativeDef midp_natives[] = {
     { "btvm/Native", "rmsList", NULL, n_rmsList },
     { "btvm/Native", "textInput", NULL, n_textInput },
     { "btvm/Native", "vibrate", NULL, n_vibrate },
+    { "btvm/Native", "openUrl", NULL, n_openUrl },
     { "btvm/Native", "sndCreate", NULL, s_create },
     { "btvm/Native", "sndCreateFreq", NULL, s_createFreq },
     { "btvm/Native", "sndFree", NULL, s_free },
@@ -994,6 +1007,95 @@ static void screen_size_from_manifest(void)
             return;
         }
     }
+}
+
+/* Широкоэкранный режим: экран игры под форму телефона, короткая сторона — как у игры.
+ * В портрете игре достаётся ~68% высоты (снизу кнопки), в альбоме — весь экран. */
+static void wide_size(void)
+{
+    int dw, dh, s = M.w < M.h ? M.w : M.h, w, h;
+
+    platform_display_size(&dw, &dh);
+    if (dw <= 0 || dh <= 0)
+        return;
+    if (dh > dw) {
+        w = s;
+        h = (int)((float)s * (float)dh * 0.68f / (float)dw);
+    } else {
+        h = s;
+        w = (int)((float)s * (float)dw / (float)dh);
+    }
+    M.ow = M.w;
+    M.oh = M.h;
+    M.w = (w > 640 ? 640 : w) & ~1;
+    M.h = (h > 640 ? 640 : h) & ~1;
+    M.wide = 1;
+}
+
+/* Многие игры берут размер экрана из своего конфига (scr_width=240 у Dynamic Pixels и др.):
+ * в широкоэкранном режиме подменяем такие строки на новый размер. */
+static int wide_key(const char *k, int n, const char *what)
+{
+    char low[64];
+    int i;
+
+    if (n <= 0 || n >= (int)sizeof(low))
+        return 0;
+    for (i = 0; i < n; i++)
+        low[i] = (char)(k[i] >= 'A' && k[i] <= 'Z' ? k[i] + 32 : k[i]);
+    low[n] = '\0';
+    if (!strstr(low, "scr") && !strstr(low, "screen") && !strstr(low, "display"))
+        return 0;
+    return strstr(low, what) != NULL || (low[n - 1] == what[0] && (low[n - 2] == '_' || low[n - 2] == '-'));
+}
+
+static uint8_t *wide_filter(const char *path, uint8_t *data, size_t *len)
+{
+    char *out;
+    size_t i = 0, o = 0;
+    int changed = 0;
+
+    (void)path;
+    if (!M.wide || *len > 16384 || memchr(data, 0, *len) || !(out = malloc(*len + 64)))
+        return data;
+    while (i < *len) {
+        size_t eol = i, eq, v0, v1;
+        while (eol < *len && data[eol] != '\n')
+            eol++;
+        for (eq = i; eq < eol && data[eq] != '=' && data[eq] != ':'; eq++)
+            ;
+        v0 = eq + 1;
+        while (v0 < eol && data[v0] == ' ')
+            v0++;
+        for (v1 = v0; v1 < eol && data[v1] >= '0' && data[v1] <= '9'; v1++)
+            ;
+        if (eq < eol && v1 > v0 && v1 - v0 < 5) {
+            size_t ke = eq;
+            int val = atoi((const char *)data + v0), nv = -1;
+            while (ke > i && data[ke - 1] == ' ')
+                ke--;
+            if (val == M.ow && wide_key((const char *)data + i, (int)(ke - i), "width"))
+                nv = M.w;
+            else if (val == M.oh && wide_key((const char *)data + i, (int)(ke - i), "height"))
+                nv = M.h;
+            if (nv >= 0 && o + (v0 - i) + 8 < *len + 64) {
+                memcpy(out + o, data + i, v0 - i);
+                o += v0 - i;
+                o += (size_t)sprintf(out + o, "%d", nv);
+                i = v1;
+                changed = 1;
+            }
+        }
+        while (i <= eol && i < *len)
+            out[o++] = (char)data[i++];
+    }
+    if (!changed) {
+        free(out);
+        return data;
+    }
+    free(data);
+    *len = o;
+    return (uint8_t *)out;
 }
 
 /* <игра>.jad рядом с JAR: в нём бывают свойства, без которых игра не стартует. */
@@ -1045,7 +1147,7 @@ MidpResult midp_run(const char *jar, const char *save_id, ScaleMode scale, char 
     char *text = NULL;
     size_t len;
     uint32_t sleep_ms, exit_deadline = 0;
-    int user_exit = 0, r;
+    int user_exit = 0, restart = 0, r;
     MidpResult result = MIDP_BACK;
 
     memset(&M, 0, sizeof(M));
@@ -1069,8 +1171,12 @@ MidpResult midp_run(const char *jar, const char *save_id, ScaleMode scale, char 
     load_jad(jar);
     screen_size_from_manifest();
     rms_dir_for(save_id);
-    platform_set_screen(M.w, M.h, scale);
     platform_touch_profile(save_id);
+    if (platform_touch_wide()) {
+        wide_size();
+        jvm_set_resource_filter(wide_filter);
+    }
+    platform_set_screen(M.w, M.h, scale);
     {
         Image *s = platform_screen();
         memset(s->px, 0, (size_t)s->w * (size_t)s->h * 4);
@@ -1090,6 +1196,9 @@ MidpResult midp_run(const char *jar, const char *save_id, ScaleMode scale, char 
             case EV_QUIT:
                 result = MIDP_QUIT;
                 goto out;
+            case EV_RESTART:
+                restart = 1;
+                /* fall through */
             case EV_BACK:
                 /* вежливо: destroyApp() даём полторы секунды, потом закрываем сами */
                 if (!user_exit) {
@@ -1145,6 +1254,9 @@ out:
         manifest_free(&M.mf);
     if (M.have_jad)
         manifest_free(&M.jad);
+    jvm_set_resource_filter(NULL);
     jvm_destroy();
+    if (restart && result == MIDP_BACK)     /* сменили размер экрана — запускаем заново */
+        return midp_run(jar, save_id, scale, err, errlen);
     return result;
 }

@@ -204,6 +204,11 @@ typedef struct {
 
 void jvm_register_natives(const NativeDef *defs);
 
+/* Подмена ресурсов игры на лету (широкоэкранный режим правит config.ini): получает данные
+ * ресурса и может вернуть другой буфер (malloc, старый тогда освобождает сам). NULL — без подмены. */
+typedef uint8_t *(*ResourceFilter)(const char *path, uint8_t *data, size_t *len);
+void jvm_set_resource_filter(ResourceFilter f);
+
 /* Нативы java.* (jvm_lib.c) и javax.microedition.* (midp.c) */
 extern const NativeDef jvm_lib_natives[];
 

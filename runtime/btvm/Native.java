@@ -40,6 +40,9 @@ public final class Native {
 
     public static native void vibrate(int ms);
 
+    /* открыть ссылку системой (браузер); false — некуда */
+    public static native boolean openUrl(String url);
+
     /* звук: дескриптор (0 — не вышло); kind 0 — по содержимому, 1 — рингтон Nokia OTT */
     public static native int sndCreate(byte[] data, int kind);
 
