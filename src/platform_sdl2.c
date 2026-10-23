@@ -51,6 +51,7 @@ static int           text_wanted;   /* игра показала TextBox/пол�
 static int           typing;        /* режим букв: буквы → мультитап, WASD не стрелки */
 static uint32_t      typing_t;
 static int           osk_open;
+static int           osk_mouse;     /* кнопку мыши нажали на экранной клавиатуре — отпускание тоже её */
 static int           pads;          /* подключено геймпадов — подсказки рисуем под них */
 static uint32_t      toast_until;   /* подсказка по кнопкам в начале игры */
 static int           toast_pending;
@@ -555,7 +556,7 @@ static void translate(const SDL_Event *e)
 
     if (menu_open && menu_event(e))
         return;                         /* меню паузы забирает ввод себе */
-    if (!touch_on && !cursor_mode && osk_open && osk_event(e))
+    if (!touch_on && !cursor_mode && (osk_open || osk_mouse) && osk_event(e))
         return;                         /* экранная клавиатура геймпада */
     if (!touch_on && !cursor_mode && typing_key(e))
         return;                         /* режим букв */
@@ -1412,7 +1413,7 @@ static void hint_draw(void)
 {
     static Image img;
     static SDL_Texture *t;
-    static const char *msg = "Ввод букв · Enter — готово, Tab — выключить";
+    static const char *msg = "Ввод букв: сначала выберите поле в игре · Enter — готово, Tab — выкл.";
     int w = gfx_text_width(&font_small, msg, 1) + 12, h = font_small.h + 6, dw, dh, k;
     SDL_Rect d;
 
@@ -1466,6 +1467,8 @@ static int osk_event(const SDL_Event *e)
 {
     int r, c, d;
 
+    if (!osk_open && e->type != SDL_MOUSEBUTTONUP && e->type != SDL_MOUSEMOTION)
+        return 0;                   /* клавиатуру закрыли, ждём только отпускания мыши */
     switch (e->type) {
     case SDL_CONTROLLERBUTTONDOWN:
         switch (e->cbutton.button) {
@@ -1513,9 +1516,18 @@ static int osk_event(const SDL_Event *e)
         if (e->button.button == SDL_BUTTON_LEFT && osk_hit(e->button.x, e->button.y, &r, &c)) {
             osk_r = r;
             osk_c = c;
+            osk_mouse = 1;
             osk_press();
             if (tex)
                 render();
+            return 1;
+        }
+        return 0;
+    case SDL_MOUSEBUTTONUP: case SDL_MOUSEMOTION:
+        /* щелчок по клавиатуре не должен дойти до игры «тапом» (Мяусим нажал бы свою кнопку под ней) */
+        if (osk_mouse) {
+            if (e->type == SDL_MOUSEBUTTONUP)
+                osk_mouse = 0;
             return 1;
         }
         return 0;
