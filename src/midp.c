@@ -512,6 +512,83 @@ static int g_rgb0(Thread *t, Value *a, Value *r)
     return NATIVE_OK;
 }
 
+/* ---------- M3G: спрайты Sprite3D и фон (javax.microedition.m3g.Graphics3D) ---------- */
+
+static int m3g_fill0(Thread *t, Value *a, Value *r)
+{
+    G g;
+    int x = a[1].i, y = a[2].i, w = a[3].i, h = a[4].i, j;
+
+    (void)t;
+    (void)r;
+    if (!a[0].l || !load_g(a[0].l, &g))
+        return NATIVE_OK;
+    g.color = (uint32_t)a[5].i | 0xFF000000u;
+    for (j = y < g.y0 ? g.y0 : y; j < y + h && j < g.y1; j++)
+        hspan(&g, x, x + w, j);
+    return NATIVE_OK;
+}
+
+static uint32_t m3g_blend(uint32_t d, uint32_t s, unsigned a, int mode)
+{
+    unsigned sh, out = 0;
+
+    switch (mode) {
+    case 64:    /* ALPHA */
+        return a >= 255 ? s | 0xFF000000u : gfx_mix(d, s, a);
+    case 65:    /* ALPHA_ADD */
+        for (sh = 0; sh < 24; sh += 8) {
+            unsigned c = ((d >> sh) & 255) + ((s >> sh) & 255) * a / 255;
+            out |= (c > 255 ? 255 : c) << sh;
+        }
+        return out | 0xFF000000u;
+    case 66: case 67:   /* MODULATE, MODULATE_X2 */
+        for (sh = 0; sh < 24; sh += 8) {
+            unsigned c = ((d >> sh) & 255) * ((s >> sh) & 255) / (mode == 67 ? 128 : 255);
+            out |= (c > 255 ? 255 : c) << sh;
+        }
+        return out | 0xFF000000u;
+    default:    /* REPLACE */
+        return s | 0xFF000000u;
+    }
+}
+
+/* sprite0(Graphics g, int[] px, iw, ih, cx, cy, cw, ch, dx, dy, dw, dh, blend, alpha, threshold):
+ * кусок картинки (cw/ch < 0 — зеркально) растягивается в прямоугольник ближайшим соседом. */
+static int m3g_sprite0(Thread *t, Value *a, Value *r)
+{
+    G g;
+    Object *arr = a[1].l;
+    int iw = a[2].i, ih = a[3].i, cx = a[4].i, cy = a[5].i, cw = a[6].i, ch = a[7].i;
+    int dx = a[8].i, dy = a[9].i, dw = a[10].i, dh = a[11].i, mode = a[12].i, alpha = a[13].i, thr = a[14].i;
+    int x, y, aw = cw < 0 ? -cw : cw, ah = ch < 0 ? -ch : ch;
+    const uint32_t *s;
+
+    (void)r;
+    if (!arr)
+        return jvm_throw(t, "java/lang/NullPointerException", NULL);
+    if (!a[0].l || !load_g(a[0].l, &g) || dw <= 0 || dh <= 0 || !aw || !ah || (int64_t)iw * ih > arr->length)
+        return NATIVE_OK;
+    s = ARR_OF(arr, uint32_t);
+    for (y = dy < g.y0 ? g.y0 : dy; y < dy + dh && y < g.y1; y++) {
+        int v = (int)((int64_t)(y - dy) * ah / dh), sy = ch < 0 ? cy + ah - 1 - v : cy + v;
+        uint32_t *d = g.buf + (size_t)y * (size_t)g.bw;
+        for (x = dx < g.x0 ? g.x0 : dx; x < dx + dw && x < g.x1; x++) {
+            int u = (int)((int64_t)(x - dx) * aw / dw), sx = cw < 0 ? cx + aw - 1 - u : cx + u;
+            uint32_t p;
+            unsigned pa;
+            if (sx < 0 || sy < 0 || sx >= iw || sy >= ih)
+                continue;       /* за краем картинки — прозрачно */
+            p = s[sy * iw + sx];
+            pa = (p >> 24) * (unsigned)alpha / 255;
+            if ((int)pa < thr || (mode != 68 && !pa && mode != 66 && mode != 67))
+                continue;
+            d[x] = m3g_blend(d[x], p, pa, mode);
+        }
+    }
+    return NATIVE_OK;
+}
+
 static const Font *font_by_id(int id, int *fake_bold)
 {
     *fake_bold = 0;
@@ -989,6 +1066,8 @@ static const NativeDef midp_natives[] = {
     { "javax/microedition/lcdui/Graphics", "rgb0", NULL, g_rgb0 },
     { "javax/microedition/lcdui/Graphics", "text0", NULL, g_text0 },
     { "javax/microedition/lcdui/Graphics", "copy0", NULL, g_copy0 },
+    { "javax/microedition/m3g/Graphics3D", "fill0", NULL, m3g_fill0 },
+    { "javax/microedition/m3g/Graphics3D", "sprite0", NULL, m3g_sprite0 },
     { "javax/microedition/lcdui/Font", "charWidth0", NULL, f_charWidth0 },
     { "javax/microedition/lcdui/Font", "stringWidth0", NULL, f_stringWidth0 },
     { "btvm/Native", "pollEvent", NULL, n_pollEvent },

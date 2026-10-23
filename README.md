@@ -233,6 +233,7 @@ LB/RB — русские/латинские, Start — готово.
 | Свойства | `getAppProperty` читает JAD рядом с JAR, затем манифест |
 | Nokia UI | `FullCanvas`, `DirectUtils`, `DirectGraphics`, `DeviceControl` |
 | Звук (MMAPI, Nokia Sound) | MIDI, WAV, AU, тоны, OTT |
+| 3D (M3G, JSR-184) | только 2D-часть: `Sprite3D`, `Image2D`, `Background`, `Camera`, `World`/`Group`, смешивание `CompositingMode` (затемнения и спрайты, как в The Sims 3); сеток `Mesh` и загрузчика `.m3g` нет |
 | SMS (JSR-120) | эмуляция оплаты: `sms://` и `platformRequest("sms:…")` «уходят» успешно, ничего не отправляя, — покупки в старых играх проходят |
 | Bluetooth (JSR-82), сеть | заглушки: игра узнаёт «недоступно» и показывает свою ошибку |
 | M3G / Mascot Capsule (3D) | нет |
