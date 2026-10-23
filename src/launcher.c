@@ -2,6 +2,7 @@
 #include "launcher.h"
 #include "library.h"
 #include "midp.h"
+#include "nes.h"
 #include "compat.h"
 #include "png.h"
 #include "audio.h"
@@ -1199,7 +1200,8 @@ static int run_game(Ui *ui, Game *g)
     if (ui->fx == FX_SHATTER)
         platform_fade_in(700);     /* анимация ушла в черноту — игра из неё проявляется */
     platform_cursor_mode(0);        /* в игре стик снова крестовина, указатель — системный */
-    r = midp_run(g->path, g->base, mode, err, sizeof(err));
+    r = g->kind == GAME_NES ? nes_run(g->path, g->base, mode, err, sizeof(err))
+                            : midp_run(g->path, g->base, mode, err, sizeof(err));
     platform_cursor_mode(1);
     ui->cur_press = 0;
 
@@ -1962,9 +1964,9 @@ int launcher_import(const char *games_dir, const char *path)
     const char *name = path, *p;
     char dst[1200], pair[1200], pair_dst[1200], stem[1024];
     FILE *f;
-    int jar = ends_with(path, ".jar");
+    int jar = ends_with(path, ".jar"), nes = ends_with(path, ".nes");
 
-    if (!jar && !ends_with(path, ".jad"))
+    if (!jar && !nes && !ends_with(path, ".jad"))
         return 0;
     for (p = path; *p; p++)
         if (*p == '/' || *p == '\\')
@@ -1974,6 +1976,11 @@ int launcher_import(const char *games_dir, const char *path)
     if (!copy_file(path, dst)) {
         BT_LOG("не удалось добавить %s\n", path);
         return 0;
+    }
+    if (nes) {                  /* картридж NES — один файл */
+        snprintf(import_sel, sizeof(import_sel), "%.1000s", dst);
+        BT_LOG("добавлена игра: %s\n", dst);
+        return 1;
     }
     /* у игры бывает пара: JAR с описанием JAD — переносим вместе */
     snprintf(stem, sizeof(stem), "%.*s", (int)(strlen(path) - 4), path);

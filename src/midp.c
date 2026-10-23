@@ -1342,6 +1342,26 @@ static void maybe_title_shot(void)
     save_shot("title.png");
 }
 
+int midp_shot(const char *save_id, const char *name)
+{
+    shots_dir_for(save_id);
+    return save_shot(name);
+}
+
+int midp_title_shot(const char *save_id)
+{
+    char path[1200];
+    FILE *f;
+
+    shots_dir_for(save_id);
+    snprintf(path, sizeof(path), "%s/title.png", M.shots);
+    if ((f = bt_fopen(path, "rb")) != NULL) {
+        fclose(f);
+        return 0;
+    }
+    return save_shot("title.png");
+}
+
 /* <игра>.jad рядом с JAR: в нём бывают свойства, без которых игра не стартует. */
 static void load_jad(const char *jar)
 {
@@ -1389,6 +1409,11 @@ static void rms_dir_for(const char *save_id)
     rms_dir_path(save_id, M.rms_dir, sizeof(M.rms_dir));
 }
 
+void midp_save_dir(const char *save_id, char *out, size_t cap)
+{
+    rms_dir_path(save_id, out, cap);
+}
+
 int midp_saves(const char *save_id, int erase)
 {
     char dir[1024], names[64][208], path[1300];
@@ -1402,7 +1427,8 @@ int midp_saves(const char *save_id, int erase)
     /* имена сперва собираем, удаляем потом: стирать прямо во время обхода папки нельзя */
     while ((name = bt_dir_next(d)) != NULL && n < 64) {
         size_t len = strlen(name);
-        if (len > 4 && len < sizeof(names[0]) && (!strcmp(name + len - 4, ".rms") || !strcmp(name + len - 4, ".tmp")))
+        if (len > 4 && len < sizeof(names[0]) &&
+            (!strcmp(name + len - 4, ".rms") || !strcmp(name + len - 4, ".tmp") || !strcmp(name + len - 4, ".sav")))
             snprintf(names[n++], sizeof(names[0]), "%s", name);
     }
     bt_dir_close(d);

@@ -156,7 +156,7 @@ public class MainActivity extends SDLActivity {
                     i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
                     i.putExtra(Intent.EXTRA_MIME_TYPES, new String[] { "application/java-archive",
                             "application/x-java-archive", "text/vnd.sun.j2me.app-descriptor",
-                            "application/octet-stream", "application/zip" });
+                            "application/octet-stream", "application/zip", "application/x-nes-rom" });
                 } else {
                     i = new Intent(Intent.ACTION_GET_CONTENT);   /* Android 4.1–4.3: обычный выбор файла */
                 }
@@ -250,7 +250,8 @@ public class MainActivity extends SDLActivity {
         return name.replace('/', '_').replace('\\', '_');
     }
 
-    /* Копирует JAR или JAD в папку игр. Файл без расширения, но с ZIP внутри, считаем JAR-ом. */
+    /* Копирует JAR, JAD или картридж NES в папку игр. Файл без расширения узнаём по началу:
+     * ZIP — JAR, «NES\x1A» — картридж. */
     private boolean copy(Uri uri) {
         String name = displayName(uri);
         String lower = name.toLowerCase(Locale.ROOT);
@@ -266,10 +267,14 @@ public class MainActivity extends SDLActivity {
             if (n <= 0)
                 return false;
             boolean zip = n >= 2 && buf[0] == 'P' && buf[1] == 'K';
-            if (!lower.endsWith(".jar") && !lower.endsWith(".jad")) {
-                if (!zip)
+            boolean nes = n >= 4 && buf[0] == 'N' && buf[1] == 'E' && buf[2] == 'S' && buf[3] == 0x1A;
+            if (!lower.endsWith(".jar") && !lower.endsWith(".jad") && !lower.endsWith(".nes")) {
+                if (nes)
+                    name = name + ".nes";      /* картридж NES без расширения */
+                else if (zip)
+                    name = name + ".jar";
+                else
                     return false;
-                name = name + ".jar";
             }
             File dir = gamesDir();
             tmp = new File(dir, name + ".part");

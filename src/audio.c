@@ -649,6 +649,11 @@ static void ensure_open(void)
     A.pump_done = 0;
 }
 
+int audio_master(void)
+{
+    return A.master;
+}
+
 void audio_set_master(int volume)
 {
     A.master = volume < 0 ? 0 : volume > 100 ? 100 : volume;

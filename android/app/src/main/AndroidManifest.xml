@@ -42,6 +42,7 @@
                 <data android:mimeType="application/java-archive" />
                 <data android:mimeType="application/x-java-archive" />
                 <data android:mimeType="text/vnd.sun.j2me.app-descriptor" />
+                <data android:mimeType="application/x-nes-rom" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
@@ -51,6 +52,9 @@
                 <data android:pathPattern=".*\\.jar" />
                 <data android:pathPattern=".*\\..*\\.jar" />
                 <data android:pathPattern=".*\\.JAR" />
+                <data android:pathPattern=".*\\.nes" />
+                <data android:pathPattern=".*\\..*\\.nes" />
+                <data android:pathPattern=".*\\.NES" />
             </intent-filter>
         </activity>
         <provider
