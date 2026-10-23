@@ -322,8 +322,7 @@ static void layout(Ui *ui)
     ui->tab_h = icon_pad.h * ui->s + 2 * imax(6, ui->H / 26);
     title_h = font_big.h + 4 + font_small.h;
     gap = imax(8, ui->H / 22);
-    /* с геймпадом сверху строка подсказок — полка ниже */
-    ui->top_min = ui->m + (ui->pad_connected ? font_small.h + 4 : font_small.h / 2 + 2);
+    ui->top_min = ui->m + font_small.h / 2 + 2;
     ui->bottom_max = ui->H - ui->tab_h - imax(6, ui->H / 28);
     ui->lib_title_y = ui->bottom_max - title_h;
     region = ui->bottom_max - ui->top_min - gap - title_h;
@@ -748,14 +747,16 @@ static void draw_tabs(Ui *ui)
                   i == ui->tab ? ui->th->accent : ui->th->sub, 0);
     }
     /* геймпад подключён — сверху подсказки, какая кнопка что делает (мигают при подключении) */
-    if (ui->pad_connected && (ui->pad_flash == 0 || (platform_ticks_ms() / 200) % 2 == 0 ||
-                              platform_ticks_ms() > ui->pad_flash)) {
+    if (ui->pad_connected && platform_hints() && (ui->pad_flash == 0 || (platform_ticks_ms() / 200) % 2 == 0 ||
+                                                  platform_ticks_ms() > ui->pad_flash)) {
         const char *lg = ui->tab == TAB_PLAY ? "A\tиграть\tView\tобложка\tLB/RB\tвкладки"
                        : ui->tab == TAB_LIBRARY ? "A\tвыбрать\tLB/RB\tвкладки" : "A\tвкл/выкл\tLB/RB\tвкладки";
         int lw = gfx_hints(NULL, &font_small, 0, 0, lg, 0);
         if (lw > ui->W - 2 * (ui->m + 30))
             lg = "A\tиграть\tLB/RB\tвкладки";
         lw = gfx_hints(NULL, &font_small, 0, 0, lg, 0);
+        /* плашкой поверх полки — коробки не сдвигаются; LB+RB прячет */
+        rrect(s, (ui->W - lw) / 2 - 4, ui->m - 5, lw + 8, font_small.h + 6, 3, ui->th->bg_top);
         gfx_hints(s, &font_small, (ui->W - lw) / 2, ui->m - 3, lg, ui->th->sub);
     }
 }
@@ -1966,10 +1967,7 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
                     select_imported(&ui);
                 }
             } else if (ev.type == EV_PAD_ADDED) {
-                if (!ui.pad_connected) {
-                    ui.pad_connected = 1;
-                    layout(&ui);
-                }
+                ui.pad_connected = 1;
                 ui.pad_flash = now + 1600;
             } else if (ev.type == EV_KEY_DOWN) {
                 on_key(&ui, ev.key, now);

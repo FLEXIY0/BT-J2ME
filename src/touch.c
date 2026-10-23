@@ -21,7 +21,7 @@ enum { P_NONE, P_KEYPAD, P_KEYBOARD };
 
 /* Подписи, которых нет среди кодов клавиш */
 enum { L_PAD = 1000, L_MENU, L_STICK, L_KNOB, L_PLUS, L_MINUS, L_EYE, L_CHECK, L_RESET, L_TRASH,
-       L_SIZE, L_WAY4, L_WAY8, L_WIDE, L_TALL, L_CAMERA, L_SHIFT, L_SHIFT_ON, L_BKSP, L_123, L_ABC, L_RU, L_EN, L_SPACE, L_ENTER, L_DOT,
+       L_SIZE, L_WAY4, L_WAY8, L_WIDE, L_TALL, L_LATCH, L_LATCH_ON, L_CAMERA, L_SHIFT, L_SHIFT_ON, L_BKSP, L_123, L_ABC, L_RU, L_EN, L_SPACE, L_ENTER, L_DOT,
        L_CHAR = 2000 /* + код символа */ };
 enum { S_NORMAL, S_PRESSED, S_CHIP, S_CHIP_ON };
 
@@ -47,7 +47,7 @@ typedef struct {
 } Tex;
 
 /* Пункт редактора: действие и прямоугольник */
-enum { A_OP_MINUS, A_OP_PLUS, A_WAY, A_WIDE, A_RESET, A_DONE, A_SIZE_MINUS, A_SIZE_PLUS, A_DELETE, A_ADD };
+enum { A_OP_MINUS, A_OP_PLUS, A_WAY, A_WIDE, A_LATCH, A_RESET, A_DONE, A_SIZE_MINUS, A_SIZE_PLUS, A_DELETE, A_ADD };
 typedef struct {
     int      action, arg, label;
     SDL_Rect r;
@@ -61,7 +61,7 @@ static struct {
     char          id[256];
     Layout        lay[2];       /* 0 — портрет, 1 — альбом */
     float         opacity;
-    int           four_way, wide, wide_saved, restart, shot, flash_t;
+    int           four_way, wide, wide_saved, latch, restart, shot, flash_t;
     int           W, H, gw, gh;
     SDL_Rect      g;            /* где картинка игры */
     Finger        f[MAX_FINGERS];
@@ -214,6 +214,7 @@ static void profile_load(void)
     T.opacity = 0.6f;
     T.four_way = 0;
     T.wide = 0;
+    T.latch = 0;
     memset(T.lay, 0, sizeof(T.lay));
     profile_path(path, sizeof(path), 0);
     if (!(f = bt_fopen(path, "r")))
@@ -228,6 +229,8 @@ static void profile_load(void)
             T.four_way = n != 0;
         else if (sscanf(line, "wide %d", &n) == 1)
             T.wide = n != 0;
+        else if (sscanf(line, "latch %d", &n) == 1)
+            T.latch = n != 0;
         else if (sscanf(line, "layout %d", &n) == 1 && (n == 0 || n == 1)) {
             o = n;
             T.lay[o].valid = 1;
@@ -248,7 +251,7 @@ static void profile_save(void)
     profile_path(path, sizeof(path), 1);
     if (!(f = bt_fopen(path, "w")))
         return;
-    fprintf(f, "opacity %.2f\nfourway %d\nwide %d\n", T.opacity, T.four_way, T.wide);
+    fprintf(f, "opacity %.2f\nfourway %d\nwide %d\nlatch %d\n", T.opacity, T.four_way, T.wide, T.latch);
     for (o = 0; o < 2; o++) {
         if (!T.lay[o].valid)
             continue;
@@ -412,6 +415,11 @@ static void draw_label(Image *im, int label, int w, int h, uint32_t c)
     case L_BKSP:  ICON(ic_arrow, 3); break;
     case L_WIDE:  /* экран под телефон — широкий прямоугольник */
         shape(im, w * 0.18f, h * 0.32f, w * 0.64f, h * 0.36f, m * 0.05f, 0, c, m * 0.06f);
+        break;
+    case L_LATCH: case L_LATCH_ON:  /* стрелка; включено — с упором «→|»: направление держится */
+        ICON(ic_arrow, 1);
+        if (label == L_LATCH_ON)
+            shape(im, w * 0.8f, h * 0.25f, w * 0.07f, h * 0.5f, 1, c, 0, 0);
         break;
     case L_TALL:  /* экран как задумано — узкий «телефонный» */
         shape(im, w * 0.33f, h * 0.2f, w * 0.34f, h * 0.6f, m * 0.05f, 0, c, m * 0.06f);
@@ -906,15 +914,16 @@ static int editor_items(Item *it, int cap, SDL_Rect *panel)
 {
     float u = unit();
     int b = (int)(11 * u), gap = (int)(2 * u) + 1, x = gap, y = gap, n = 0, i;
-    int row1[6][3] = { { A_OP_MINUS, 0, L_MINUS }, { A_OP_PLUS, 0, L_PLUS }, { A_WAY, 0, 0 },
-                       { A_WIDE, 0, 0 }, { A_RESET, 0, L_RESET }, { A_DONE, 0, L_CHECK } };
+    int row1[7][3] = { { A_OP_MINUS, 0, L_MINUS }, { A_OP_PLUS, 0, L_PLUS }, { A_WAY, 0, 0 },
+                       { A_WIDE, 0, 0 }, { A_LATCH, 0, 0 }, { A_RESET, 0, L_RESET }, { A_DONE, 0, L_CHECK } };
 
 #define PUT(a, g, l) do { if (x + b > T.W - gap && x > gap) { x = gap; y += b + gap; } \
         if (n < cap) { it[n].action = (a); it[n].arg = (g); it[n].label = (l); \
         it[n].r.x = x; it[n].r.y = y; it[n].r.w = it[n].r.h = b; n++; } x += b + gap; } while (0)
-    for (i = 0; i < 6; i++) {
+    for (i = 0; i < 7; i++) {
         PUT(row1[i][0], 0, row1[i][0] == A_WAY ? (T.four_way ? L_WAY4 : L_WAY8) :
-                           row1[i][0] == A_WIDE ? (T.wide ? L_WIDE : L_TALL) : row1[i][2]);
+                           row1[i][0] == A_WIDE ? (T.wide ? L_WIDE : L_TALL) :
+                           row1[i][0] == A_LATCH ? (T.latch ? L_LATCH_ON : L_LATCH) : row1[i][2]);
         if (i == 1)
             x += gap * 2;
     }
@@ -954,6 +963,7 @@ static void editor_action(const Item *it)
     case A_OP_PLUS:  T.opacity = clampf(T.opacity + 0.1f, 0.15f, 1); break;
     case A_WAY:      T.four_way = !T.four_way; break;
     case A_WIDE:     T.wide = !T.wide; break;     /* экран игры: как задумано или под телефон */
+    case A_LATCH:    T.latch = !T.latch; break;   /* залипание стрелок */
     case A_RESET:
         default_layout(land());
         T.opacity = 0.6f;
@@ -1328,6 +1338,11 @@ int touch_dirty(void)
 int touch_wide(void)
 {
     return T.game && T.wide;
+}
+
+int touch_latch(void)
+{
+    return T.game && T.latch;
 }
 
 int touch_take_shot(void)

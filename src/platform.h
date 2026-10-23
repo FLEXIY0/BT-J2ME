@@ -71,6 +71,8 @@ void     platform_sleep_ms(uint32_t ms);
 void     platform_touch_profile(const char *game_id);
 /* Широкоэкранный режим выбран для этой игры (после platform_touch_profile). */
 int      platform_touch_wide(void);
+/* «Залипание стрелок» для текущей игры: отпускание направления придерживается. */
+int      platform_latch(void);
 /* Добавить игры системным выбором файлов (Android); по готовности придёт EV_REFRESH. */
 int      platform_can_import(void);
 void     platform_import_games(void);
@@ -87,6 +89,8 @@ int      platform_paused(void);
 /* Полный экран: 1/0, -1 — переключать нельзя (телефон). */
 int      platform_fullscreen(void);
 void     platform_set_fullscreen(int on);
+/* Показывать подсказки по кнопкам геймпада (скрываются LB+RB или в меню паузы). */
+int      platform_hints(void);
 /* Отклонение левого стика, -1..1 по каждой оси. */
 void     platform_stick(float *x, float *y);
 /* Открыть ссылку системным браузером (platformRequest); 0 — не получилось. */

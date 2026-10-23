@@ -33,6 +33,8 @@ void touch_vibrate(int ms);
 void touch_text_input(int on);
 /* Широкоэкранный режим игры и запрос перезапуска после его смены в редакторе. */
 int  touch_wide(void);
+/* Залипание стрелок в этой игре. */
+int  touch_latch(void);
 int  touch_take_restart(void);
 /* Нажали кнопку снимка экрана. */
 int  touch_take_shot(void);

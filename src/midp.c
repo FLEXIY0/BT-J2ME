@@ -27,9 +27,11 @@
 #define EVQ_LEN 64
 #define KEY_SLOTS 160   /* коды клавиш MIDP от -16 до 143 */
 #define MIN_PRESS_MS 100
+#define LATCH_MS     450   /* «залипание стрелок»: столько направление ещё держится после отпускания */
 
 typedef struct {
-    int type, a, b;
+    int      type, a, b;
+    uint32_t t;         /* когда поставлено — для BT_PERF */
 } MEvent;
 
 static struct {
@@ -37,6 +39,7 @@ static struct {
     Manifest  mf, jad;
     int       have_mf, have_jad;
     long      jar_size;     /* MIDlet-Jar-Size, если JAD нет */
+    int       perf;         /* BT_PERF: задержки ввода и подвисания — в журнал */
     int       wide, ow, oh;     /* широкоэкранный режим: исходный размер игры */
     char      shots[1100];      /* папка скриншотов игры */
     uint32_t  t_start;
@@ -66,14 +69,27 @@ static void evq_push(int type, int a, int b)
     e->type = type;
     e->a = a;
     e->b = b;
+    e->t = jvm_now();
 }
 
 /* Игры часто опрашивают клавиши раз в кадр: слишком короткое нажатие они не заметят.
  * На телефоне кнопку держали минимум 50–100 мс, поэтому отпускание придерживаем. */
+static int is_dir(int key)
+{
+    return (key <= KEY_UP && key >= KEY_RIGHT) || key == '2' || key == '4' || key == '6' || key == '8';
+}
+
 static void key_down(int key, int printable)
 {
-    int k = key + 16;
+    int k = key + 16, d;
 
+    if (is_dir(key) && platform_latch())    /* новое направление сменяет придержанное старое */
+        for (d = 0; d < KEY_SLOTS; d++)
+            if (d != k && M.release_at[d] && is_dir(d - 16)) {
+                M.release_at[d] = 0;
+                M.pressed_at[d] = 0;
+                evq_push(MEV_KEY_UP, d - 16, 0);
+            }
     if (k >= 0 && k < KEY_SLOTS) {
         if (M.release_at[k]) {          /* нажали снова, пока ждали отпускания */
             evq_push(MEV_KEY_UP, key, 0);
@@ -89,6 +105,12 @@ static void key_up(int key)
     int k = key + 16;
     uint32_t now = jvm_now();
 
+    if (k >= 0 && k < KEY_SLOTS && M.pressed_at[k] && is_dir(key) && platform_latch()) {
+        /* игры вроде «Кошек-мышек» поворачивают, только пока стрелка зажата, а до перекрёстка
+         * ещё доехать — короткое нажатие держим дольше */
+        M.release_at[k] = now + LATCH_MS;
+        return;
+    }
     if (k >= 0 && k < KEY_SLOTS && M.pressed_at[k] && now - M.pressed_at[k] < MIN_PRESS_MS) {
         M.release_at[k] = M.pressed_at[k] + MIN_PRESS_MS;
         return;
@@ -660,6 +682,8 @@ static int n_pollEvent(Thread *t, Value *a, Value *r)
     e = &M.q[M.q_head];
     M.q_head = (M.q_head + 1) % EVQ_LEN;
     M.q_len--;
+    if (M.perf && (e->type == MEV_KEY_DOWN || e->type == MEV_PTR_DOWN))
+        fprintf(stderr, "perf: нажатие %d дошло до игры за %u мс\n", e->a, (unsigned)(jvm_now() - e->t));
     ARR_OF(out, int32_t)[0] = e->a;
     ARR_OF(out, int32_t)[1] = e->b;
     ARR_OF(out, int32_t)[2] = 0;
@@ -1255,6 +1279,7 @@ MidpResult midp_run(const char *jar, const char *save_id, ScaleMode scale, char 
         }
     }
     M.t_start = jvm_now();
+    M.perf = getenv("BT_PERF") != NULL;
     platform_touch_profile(save_id);
     if (platform_touch_wide()) {
         wide_size();
@@ -1328,7 +1353,12 @@ MidpResult midp_run(const char *jar, const char *save_id, ScaleMode scale, char 
             jvm_wake_event_waiters();
         if (user_exit && (int32_t)(jvm_now() - exit_deadline) >= 0)
             break;
-        r = jvm_step(12, &sleep_ms);
+        {
+            uint32_t s0 = jvm_now();
+            r = jvm_step(12, &sleep_ms);
+            if (M.perf && jvm_now() - s0 > 60)
+                fprintf(stderr, "perf: шаг машины %u мс\n", (unsigned)(jvm_now() - s0));
+        }
         if (r < 0)
             break;
         if (r == 0)

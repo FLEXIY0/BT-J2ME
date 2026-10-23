@@ -40,8 +40,11 @@ static SDL_Rect      game_dst;      /* куда на окне ложится э�
 
 /* Настройки ПК: полный экран, масштаб игр, звук, широкий экран по играм — <config>/bt-j2me/pc.cfg */
 #define MAX_WIDE 64
-static int           pc_full = 1, pc_scale = -1, pc_mute, pc_loaded;
+static int           pc_full = 1, pc_scale = -1, pc_mute, pc_loaded, pc_hints = 1;
+static int           pad_lb, pad_rb; /* плечевые зажаты — LB+RB прячет подсказки */
 static char          pc_wide[MAX_WIDE][128];
+static char          pc_latch[MAX_WIDE][128]; /* игры с залипанием стрелок */
+static int           pc_nlatch;
 static int           pc_nwide;
 static char          pc_game[128];  /* игра, что сейчас идёт (для широкого экрана) */
 static volatile int  menu_open;     /* меню паузы */
@@ -53,8 +56,6 @@ static uint32_t      typing_t;
 static int           osk_open;
 static int           osk_mouse;     /* кнопку мыши нажали на экранной клавиатуре — отпускание тоже её */
 static int           pads;          /* подключено геймпадов — подсказки рисуем под них */
-static uint32_t      toast_until;   /* подсказка по кнопкам в начале игры */
-static int           toast_pending;
 static void toast_draw(void);
 static int  typing_key(const SDL_Event *e);
 static int  osk_event(const SDL_Event *e);
@@ -65,6 +66,8 @@ static int  menu_event(const SDL_Event *e);
 static void set_fullscreen(int on);
 static int  pc_wide_index(const char *id);
 static void pc_load(void);
+static void pc_save(void);
+static int  menu_dirty;
 static void render(void);
 
 static void push(EventType type, int key)
@@ -343,15 +346,11 @@ static void render(void)
         touch_draw();
     } else {
         SDL_RenderCopy(ren, tex, NULL, &game_dst);
-        if (toast_pending) {
-            toast_pending = 0;
-            toast_until = SDL_GetTicks() + 6000;
-        }
         if (osk_open)
             osk_draw();
         else if (typing)
             hint_draw();
-        else if (toast_until && !menu_open)
+        else if (pads && pc_hints && !cursor_mode && !menu_open && screen.px)
             toast_draw();
         if (menu_open)
             menu_draw();
@@ -388,9 +387,6 @@ void platform_touch_profile(const char *game_id)
         menu_close();
         osk_open = 0;
         typing = 0;
-        toast_until = 0;
-    } else if (!touch_on) {
-        toast_pending = 1;          /* подсказка по кнопкам — с первого кадра игры */
     }
 }
 
@@ -554,6 +550,22 @@ static void translate(const SDL_Event *e)
 {
     int key;
 
+    if ((e->type == SDL_CONTROLLERBUTTONDOWN || e->type == SDL_CONTROLLERBUTTONUP) &&
+        (e->cbutton.button == SDL_CONTROLLER_BUTTON_LEFTSHOULDER ||
+         e->cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)) {
+        int down = e->type == SDL_CONTROLLERBUTTONDOWN, was = pad_lb && pad_rb;
+        if (e->cbutton.button == SDL_CONTROLLER_BUTTON_LEFTSHOULDER)
+            pad_lb = down;
+        else
+            pad_rb = down;
+        if (!was && pad_lb && pad_rb) {     /* LB+RB вместе — спрятать или вернуть подсказки */
+            pc_hints = !pc_hints;
+            pc_save();
+            menu_dirty = 1;
+            if (tex)
+                render();
+        }
+    }
     if (menu_open && menu_event(e))
         return;                         /* меню паузы забирает ввод себе */
     if (!touch_on && !cursor_mode && (osk_open || osk_mouse) && osk_event(e))
@@ -721,11 +733,6 @@ int platform_poll(Event *ev)
         !(SDL_GetMouseState(NULL, NULL) & SDL_BUTTON_LMASK))
         show_mouse(0);
     mt_tick(SDL_GetTicks());
-    if (toast_until && (int32_t)(SDL_GetTicks() - toast_until) >= 0) {
-        toast_until = 0;            /* подсказка ушла — убрать её и с неподвижного кадра */
-        if (tex)
-            render();
-    }
     if (typing && !osk_open && SDL_GetTicks() - typing_t > 8000) {
         typing = 0;                 /* давно не печатали — клавиши снова управление */
         if (tex)
@@ -848,8 +855,12 @@ static void pc_load(void)
             pc_full = atoi(line + 11) != 0;
         else if (!strncmp(line, "scale ", 6))
             pc_scale = atoi(line + 6);
+        else if (!strncmp(line, "hints ", 6))
+            pc_hints = atoi(line + 6) != 0;
         else if (!strncmp(line, "mute ", 5))
             pc_mute = atoi(line + 5) != 0;
+        else if (!strncmp(line, "latch ", 6) && pc_nlatch < MAX_WIDE)
+            snprintf(pc_latch[pc_nlatch++], sizeof(pc_latch[0]), "%.127s", line + 6);
         else if (!strncmp(line, "wide ", 5) && pc_nwide < MAX_WIDE)
             snprintf(pc_wide[pc_nwide++], sizeof(pc_wide[0]), "%.127s", line + 5);
     }
@@ -867,10 +878,29 @@ static void pc_save(void)
     pc_path(path, sizeof(path), 1);
     if (!(f = bt_fopen(path, "wb")))
         return;
-    fprintf(f, "fullscreen %d\nscale %d\nmute %d\n", pc_full, pc_scale, pc_mute);
+    fprintf(f, "fullscreen %d\nscale %d\nmute %d\nhints %d\n", pc_full, pc_scale, pc_mute, pc_hints);
     for (i = 0; i < pc_nwide; i++)
         fprintf(f, "wide %s\n", pc_wide[i]);
+    for (i = 0; i < pc_nlatch; i++)
+        fprintf(f, "latch %s\n", pc_latch[i]);
     fclose(f);
+}
+
+static int pc_latch_index(const char *id)
+{
+    int i;
+
+    for (i = 0; i < pc_nlatch; i++)
+        if (!strcmp(pc_latch[i], id))
+            return i;
+    return -1;
+}
+
+int platform_latch(void)
+{
+    if (touch_on)
+        return touch_latch();
+    return pc_game[0] && pc_latch_index(pc_game) >= 0;
 }
 
 static int pc_wide_index(const char *id)
@@ -892,14 +922,14 @@ static void set_fullscreen(int on)
 }
 
 /* Пункты меню. */
-enum { MI_RESUME, MI_FULL, MI_SCALE, MI_WIDE, MI_SOUND, MI_SHOT, MI_EXIT, MI_COUNT };
+enum { MI_RESUME, MI_FULL, MI_SCALE, MI_WIDE, MI_LATCH, MI_SOUND, MI_HINTS, MI_SHOT, MI_EXIT, MI_COUNT };
 
 #define MENU_W     236
 #define MENU_ROW   18
 #define MENU_TOP   30
 #define MENU_H     (MENU_TOP + MI_COUNT * MENU_ROW + 24)
 
-static int          menu_sel, menu_dirty, menu_k, menu_stick;
+static int          menu_sel, menu_k, menu_stick;
 static Image        menu_img;
 static SDL_Texture *menu_tex;
 static SDL_Rect     menu_dst;
@@ -914,7 +944,9 @@ static void menu_label(int i, char *out, size_t cap)
     case MI_FULL:   snprintf(out, cap, "Экран: %s", pc_full ? "полный" : "окно"); break;
     case MI_SCALE:  snprintf(out, cap, "Масштаб: %s", scales[sc < 0 || sc > 3 ? 2 : sc]); break;
     case MI_WIDE:   snprintf(out, cap, "Широкий экран: %s", pc_wide_index(pc_game) >= 0 ? "да" : "нет"); break;
+    case MI_LATCH:  snprintf(out, cap, "Залипание стрелок: %s", pc_latch_index(pc_game) >= 0 ? "да" : "нет"); break;
     case MI_SOUND:  snprintf(out, cap, "Звук: %s", pc_mute ? "выкл" : "вкл"); break;
+    case MI_HINTS:  snprintf(out, cap, "Подсказки геймпада: %s", pc_hints ? "да" : "нет"); break;
     case MI_SHOT:   snprintf(out, cap, "Снимок экрана"); break;
     default:        snprintf(out, cap, "Выйти на полку"); break;
     }
@@ -1051,8 +1083,23 @@ static void menu_activate(int dir)
         push(EV_RESTART, 0);        /* размер экрана игры меняется только с перезапуском */
         return;
     }
+    case MI_LATCH: {
+        int i = pc_latch_index(pc_game);
+        if (!pc_game[0])
+            break;
+        if (i >= 0)
+            memmove(pc_latch[i], pc_latch[i + 1], (size_t)(pc_nlatch-- - i - 1) * sizeof(pc_latch[0]));
+        else if (pc_nlatch < MAX_WIDE)
+            snprintf(pc_latch[pc_nlatch++], sizeof(pc_latch[0]), "%s", pc_game);
+        pc_save();
+        break;
+    }
     case MI_SOUND:
         pc_mute = !pc_mute;
+        pc_save();
+        break;
+    case MI_HINTS:
+        pc_hints = !pc_hints;
         pc_save();
         break;
     case MI_SHOT:
@@ -1090,11 +1137,11 @@ static int menu_event(const SDL_Event *e)
         case SDLK_UP: case SDLK_w: menu_move(-1); return 1;
         case SDLK_DOWN: case SDLK_s: menu_move(1); return 1;
         case SDLK_LEFT: case SDLK_a:
-            if (menu_sel == MI_SCALE || menu_sel == MI_FULL || menu_sel == MI_SOUND)
+            if (menu_sel == MI_SCALE || menu_sel == MI_FULL || menu_sel == MI_SOUND || menu_sel == MI_LATCH || menu_sel == MI_HINTS)
                 menu_activate(-1);
             return 1;
         case SDLK_RIGHT: case SDLK_d:
-            if (menu_sel == MI_SCALE || menu_sel == MI_FULL || menu_sel == MI_SOUND)
+            if (menu_sel == MI_SCALE || menu_sel == MI_FULL || menu_sel == MI_SOUND || menu_sel == MI_LATCH || menu_sel == MI_HINTS)
                 menu_activate(1);
             return 1;
         case SDLK_RETURN: case SDLK_SPACE: case SDLK_KP_ENTER:
@@ -1209,7 +1256,10 @@ static void set_typing(int on)
         render();
 }
 
-/* Клавиатура ПК в игре. Буквы, кроме WASD/QE, сами включают режим букв (Tab — вручную):
+static int      letter_armed, pend_ch;     /* первая буква — ждём вторую, тогда режим букв */
+static uint32_t pend_t;
+
+/* Клавиатура ПК в игре. Две буквы подряд (кроме WASD/QE) сами включают режим букв (Tab — вручную):
  * тогда все буквы, кириллица, пробел и цифры уходят мультитапом, а Enter, стрелки,
  * Esc и Tab режим выключают. Вне режима всё как раньше. 1 — событие съедено. */
 static int typing_key(const SDL_Event *e)
@@ -1221,11 +1271,22 @@ static int typing_key(const SDL_Event *e)
         if (text_wanted)
             return 0;               /* TextBox: символы идут как есть */
         if (!typing) {
-            /* кириллица на русской раскладке — точно набирают текст */
-            const unsigned char *u = (const unsigned char *)p;
-            if (u[0] < 0x80)
+            /* одна случайная клавиша посреди игры режим не включает — нужны две буквы подряд
+             * (кириллица или латиница не с WASD/QE) */
+            const char *q = p;
+            int c = utf8_decode(&q), candidate = c >= 0x80 || letter_armed;
+            uint32_t now = SDL_GetTicks();
+            letter_armed = 0;
+            if (!candidate)
                 return 1;
+            if (!pend_ch || now - pend_t > 800) {
+                pend_ch = c;
+                pend_t = now;
+                return 1;
+            }
             set_typing(1);
+            type_char(pend_ch);
+            pend_ch = 0;
         }
         while (*p)
             type_char(utf8_decode(&p));
@@ -1238,14 +1299,16 @@ static int typing_key(const SDL_Event *e)
         return 0;
     k = e->key.keysym.sym;
     if (k == SDLK_TAB) {
-        if (e->type == SDL_KEYDOWN && !e->key.repeat)
+        if (e->type == SDL_KEYDOWN && !e->key.repeat) {
             set_typing(!typing);
+            pend_ch = 0;
+        }
         return 1;
     }
     if (!typing) {
         if (e->type == SDL_KEYDOWN && k >= SDLK_a && k <= SDLK_z && k != SDLK_w && k != SDLK_a &&
             k != SDLK_s && k != SDLK_d && k != SDLK_q && k != SDLK_e && !(e->key.keysym.mod & (KMOD_CTRL | KMOD_ALT))) {
-            set_typing(1);          /* сама буква придёт следом через SDL_TEXTINPUT */
+            letter_armed = 1;       /* сама буква придёт следом через SDL_TEXTINPUT */
             return 1;
         }
         return 0;
@@ -1547,44 +1610,74 @@ void platform_set_fullscreen(int on)
         set_fullscreen(on);
 }
 
-/* В начале игры — какие кнопки что делают (геймпад или клавиатура). */
+int platform_hints(void)
+{
+    return pc_hints;
+}
+
+/* Подсказки геймпада поверх игры: столбиком в свободном поле сбоку, а если поля нет —
+ * полосой внизу. LB+RB или меню паузы их прячут. */
 static void toast_draw(void)
 {
-    static Image img;
-    static SDL_Texture *t;
-    static int for_pad = -1, w, h;
-    const char *lg = pads ? "View\tменю\tL3\tклавиатура\tStart\tлевая софт\tB\tправая софт"
-                          : "[Esc]\tменю\t[F11]\tполный экран\t[Tab]\tввод букв\t[F1][F2]\tсофт-клавиши";
-    int dw, dh, k;
+    static const char *const pairs[] = { "View\tменю", "A\tогонь (5)", "Start\tлевая софт", "B\tправая софт",
+                                         "L3\tклавиатура", "LB+RB\tскрыть" };
+    enum { N = sizeof(pairs) / sizeof(pairs[0]) };
+    static Image col, row;
+    static SDL_Texture *tcol, *trow;
+    static int cw, ch, rw, rh;
+    int dw, dh, k, i, side;
     SDL_Rect d;
 
-    if (for_pad != (pads > 0)) {
-        for_pad = pads > 0;
-        image_free(&img);
-        if (t)
-            SDL_DestroyTexture(t);
-        t = NULL;
-        w = gfx_hints(NULL, &font_small, 0, 0, lg, 0) + 12;
-        h = font_small.h + 10;
-        img = image_new(w, h);
-        if (!img.px)
-            return;
-        gfx_fill(&img, 0, 0, w, h, 0xE61A1724u);
-        gfx_hints(&img, &font_small, 6, 4, lg, 0xFFEDE8F2u);
-        t = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, w, h);
-        if (t) {
-            SDL_SetTextureBlendMode(t, SDL_BLENDMODE_BLEND);
-            SDL_UpdateTexture(t, NULL, img.px, w * 4);
+    if (!tcol) {
+        int line = font_small.h + 5;
+        char all[256] = "";
+        cw = 0;
+        for (i = 0; i < N; i++) {
+            int w = gfx_hints(NULL, &font_small, 0, 0, pairs[i], 0);
+            cw = w > cw ? w : cw;
+            snprintf(all + strlen(all), sizeof(all) - strlen(all), "%s%s", i ? "\t" : "", pairs[i]);
         }
+        cw += 10;
+        ch = N * line + 6;
+        rw = gfx_hints(NULL, &font_small, 0, 0, all, 0) + 12;
+        rh = font_small.h + 10;
+        col = image_new(cw, ch);
+        row = image_new(rw, rh);
+        if (!col.px || !row.px)
+            return;
+        gfx_fill(&col, 0, 0, cw, ch, 0xB01A1724u);
+        for (i = 0; i < N; i++)
+            gfx_hints(&col, &font_small, 5, 4 + i * line, pairs[i], 0xFFEDE8F2u);
+        gfx_fill(&row, 0, 0, rw, rh, 0xB01A1724u);
+        gfx_hints(&row, &font_small, 6, 4, all, 0xFFEDE8F2u);
+        tcol = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, cw, ch);
+        trow = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, rw, rh);
+        if (!tcol || !trow)
+            return;
+        SDL_SetTextureBlendMode(tcol, SDL_BLENDMODE_BLEND);
+        SDL_SetTextureBlendMode(trow, SDL_BLENDMODE_BLEND);
+        SDL_UpdateTexture(tcol, NULL, col.px, cw * 4);
+        SDL_UpdateTexture(trow, NULL, row.px, rw * 4);
     }
-    if (!t)
-        return;
     platform_display_size(&dw, &dh);
-    k = dw * 9 / 10 / w;
+    side = dw - (game_dst.x + game_dst.w);       /* свободное поле справа от игры */
+    k = (side - dw / 60) / cw;
+    if (k > dh / 2 / ch)
+        k = dh / 2 / ch;
+    if (k >= 1) {
+        k = k > 3 ? 3 : k;
+        d.w = cw * k;
+        d.h = ch * k;
+        d.x = game_dst.x + game_dst.w + (side - d.w) / 2;
+        d.y = dh - d.h - dh / 20;
+        SDL_RenderCopy(ren, tcol, NULL, &d);
+        return;
+    }
+    k = dw * 95 / 100 / rw;
     k = k < 1 ? 1 : k > 3 ? 3 : k;
-    d.w = w * k;
-    d.h = h * k;
+    d.w = rw * k;
+    d.h = rh * k;
     d.x = (dw - d.w) / 2;
-    d.y = dh - d.h - dh / 30;
-    SDL_RenderCopy(ren, t, NULL, &d);
+    d.y = dh - d.h - dh / 60;
+    SDL_RenderCopy(ren, trow, NULL, &d);
 }
