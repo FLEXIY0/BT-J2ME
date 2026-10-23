@@ -917,6 +917,22 @@ static int s_tone(Thread *t, Value *a, Value *r)
     return NATIVE_OK;
 }
 
+static int n_textInput(Thread *t, Value *a, Value *r)
+{
+    (void)t;
+    (void)r;
+    platform_text_input(a[0].i);
+    return NATIVE_OK;
+}
+
+static int n_vibrate(Thread *t, Value *a, Value *r)
+{
+    (void)t;
+    (void)r;
+    platform_vibrate(a[0].i);
+    return NATIVE_OK;
+}
+
 static const NativeDef midp_natives[] = {
     { "javax/microedition/lcdui/Graphics", "fill0", NULL, g_fill0 },
     { "javax/microedition/lcdui/Graphics", "line0", NULL, g_line0 },
@@ -942,6 +958,8 @@ static const NativeDef midp_natives[] = {
     { "btvm/Native", "rmsSave", NULL, n_rmsSave },
     { "btvm/Native", "rmsDelete", NULL, n_rmsDelete },
     { "btvm/Native", "rmsList", NULL, n_rmsList },
+    { "btvm/Native", "textInput", NULL, n_textInput },
+    { "btvm/Native", "vibrate", NULL, n_vibrate },
     { "btvm/Native", "sndCreate", NULL, s_create },
     { "btvm/Native", "sndCreateFreq", NULL, s_createFreq },
     { "btvm/Native", "sndFree", NULL, s_free },
@@ -1052,6 +1070,7 @@ MidpResult midp_run(const char *jar, const char *save_id, ScaleMode scale, char 
     screen_size_from_manifest();
     rms_dir_for(save_id);
     platform_set_screen(M.w, M.h, scale);
+    platform_touch_profile(save_id);
     {
         Image *s = platform_screen();
         memset(s->px, 0, (size_t)s->w * (size_t)s->h * 4);
@@ -1119,6 +1138,8 @@ MidpResult midp_run(const char *jar, const char *save_id, ScaleMode scale, char 
     }
 
 out:
+    platform_touch_profile(NULL);
+    platform_text_input(0);
     audio_reset();     /* до jvm_destroy: звуки игры больше никому не нужны */
     if (M.have_mf)
         manifest_free(&M.mf);

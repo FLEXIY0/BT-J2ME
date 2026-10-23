@@ -59,6 +59,7 @@ typedef struct {
     float        pos, grid_scroll;
     int          held, held_since, last_repeat;
     int          pad_connected;
+    int          ptr_down, ptr_x0, ptr_y0, ptr_x, ptr_y;   /* касание: тап или свайп решаем при отпускании */
     uint32_t     pad_flash;
     uint32_t     launch_t0;
 } Ui;
@@ -492,12 +493,18 @@ static void draw_counter(Ui *ui, int cur, int total)
              ui->th->sub, 1);
 }
 
+static void draw_add_tile(Ui *ui, int x, int y, int w, int h);
+
 static void draw_play(Ui *ui, uint32_t now)
 {
     Image *s = ui->scr;
     int order, i, n = ui->lib.count;
     float launch = ui->launch_t0 ? (float)(now - ui->launch_t0) / LAUNCH_MS : 0;
 
+    if (!n && platform_can_import()) {   /* пустая полка на телефоне — сразу «+» */
+        draw_add_tile(ui, (ui->W - ui->box_w) / 2, ui->box_top, ui->box_w, ui->box_h);
+        return;
+    }
     if (!n) {
         int x = (ui->W - ui->box_w) / 2;
         rrect(s, x, ui->box_top, ui->box_w, ui->box_h, 3, ui->th->tab_hi);
@@ -547,6 +554,16 @@ static void grid_cell(const Ui *ui, int i, int *x, int *y)
     *y = ui->top_min + 3 + (int)(((float)row - ui->grid_scroll) * (float)(ui->cell_h + ui->gap));
 }
 
+/* Плитка «+»: добавить игры с телефона (системный выбор файлов). */
+static void draw_add_tile(Ui *ui, int x, int y, int w, int h)
+{
+    int t = imax(2, ui->s * 2), len = imin(w, h) / 3;
+
+    rrect(ui->scr, x, y, w, h, 3, ui->th->tab_hi);
+    gfx_fill(ui->scr, x + (w - len) / 2, y + (h - t) / 2, len, t, ui->th->sub);
+    gfx_fill(ui->scr, x + (w - t) / 2, y + (h - len) / 2, t, len, ui->th->sub);
+}
+
 static void draw_library(Ui *ui, uint32_t now)
 {
     Image *s = ui->scr;
@@ -555,6 +572,12 @@ static void draw_library(Ui *ui, uint32_t now)
     if (!ui->lib.count) {
         draw_play(ui, now);
         return;
+    }
+    if (platform_can_import()) {
+        int x, y;
+        grid_cell(ui, ui->lib.count, &x, &y);
+        if (y + ui->cell_h >= ui->top_min - 4 && y <= bottom)
+            draw_add_tile(ui, x, y, ui->cell_w, ui->cell_h);
     }
     for (i = 0; i < ui->lib.count; i++) {
         int x, y, lift = i == ui->sel ? 2 : 0;
@@ -857,6 +880,18 @@ static void on_pointer(Ui *ui, int px, int py, uint32_t now)
         ui->focus_tabs = 0;
         return;
     }
+    if (!ui->lib.count && ui->tab != TAB_SETTINGS && platform_can_import()) {
+        platform_import_games();
+        return;
+    }
+    if (ui->tab == TAB_LIBRARY && platform_can_import()) {
+        int x, y;
+        grid_cell(ui, ui->lib.count, &x, &y);
+        if (px >= x && px < x + ui->cell_w && py >= y && py < y + ui->cell_h) {
+            platform_import_games();
+            return;
+        }
+    }
     if (ui->tab == TAB_PLAY) {
         int best = -1;
         if (py >= ui->title_y && px < ui->W / 4) {
@@ -899,6 +934,24 @@ static void on_pointer(Ui *ui, int px, int py, uint32_t now)
             toggle_setting(ui, row);
         }
     }
+}
+
+/* Папка игр изменилась: перечитываем полку, выбранной оставляем ту же игру, если она есть. */
+static void rescan(Ui *ui, const char *games_dir)
+{
+    char keep[1024];
+    int i;
+
+    snprintf(keep, sizeof(keep), "%s", ui->lib.count ? ui->lib.games[ui->sel].path : "");
+    library_free(&ui->lib);
+    library_scan(&ui->lib, games_dir);
+    if (!ui->lib.dir[0])
+        snprintf(ui->lib.dir, sizeof(ui->lib.dir), "%s", games_dir);
+    ui->sel = 0;
+    for (i = 0; i < ui->lib.count; i++)
+        if (!strcmp(ui->lib.games[i].path, keep))
+            ui->sel = i;
+    ui->pos = (float)ui->sel;
 }
 
 int launcher_run(const char *games_dir, PlatformConfig *cfg)
@@ -950,6 +1003,8 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
                 } else {
                     running = 0;
                 }
+            } else if (ev.type == EV_REFRESH) {
+                rescan(&ui, games_dir);
             } else if (ev.type == EV_PAD_ADDED) {
                 ui.pad_connected = 1;
                 ui.pad_flash = now + 1600;
@@ -960,7 +1015,22 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
                                                 ev.key == KEY_NUM0 + 4 || ev.key == KEY_NUM0 + 6)) {
                 ui.held = 0;
             } else if (ev.type == EV_POINTER_DOWN) {
-                on_pointer(&ui, ev.x, ev.y, now);
+                ui.ptr_down = 1;
+                ui.ptr_x0 = ui.ptr_x = ev.x;
+                ui.ptr_y0 = ui.ptr_y = ev.y;
+            } else if (ev.type == EV_POINTER_MOVE && ui.ptr_down) {
+                ui.ptr_x = ev.x;
+                ui.ptr_y = ev.y;
+            } else if (ev.type == EV_POINTER_UP && ui.ptr_down) {
+                int dx = ev.x - ui.ptr_x0, dy = ev.y - ui.ptr_y0;
+                ui.ptr_down = 0;
+                if (abs(dx) < 10 && abs(dy) < 10)
+                    on_pointer(&ui, ui.ptr_x0, ui.ptr_y0, now);
+                else if (abs(dx) > abs(dy) && ui.tab != TAB_SETTINGS && ui.ptr_y0 < ui.H - ui.tab_h) {
+                    /* свайп по полке: чем длиннее, тем дальше листаем */
+                    int n = -dx / imax(1, ui.box_w * 2 / 3);
+                    select_game(&ui, ui.sel + (n ? n : dx < 0 ? 1 : -1));
+                }
             }
         }
 

@@ -30,7 +30,8 @@ endif
 
 SRC := src/main.c src/jar.c src/manifest.c src/classfile.c src/png.c src/gfx.c \
        src/library.c src/launcher.c src/platform_$(BACKEND).c \
-       src/jvm_core.c src/jvm_interp.c src/jvm_lib.c src/rt.c src/midp.c src/audio.c src/compat.c
+       src/jvm_core.c src/jvm_interp.c src/jvm_lib.c src/rt.c src/midp.c src/audio.c src/compat.c \
+       $(if $(filter sdl2,$(BACKEND)),src/touch.c)
 OBJ := $(SRC:.c=.o)
 
 bt-j2me: $(OBJ)
@@ -42,8 +43,8 @@ src/%.o: src/%.c $(wildcard src/*.h)
 tests/png_dump: tests/png_dump.c src/png.c src/png.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/png_dump.c src/png.c -lz
 
-tests/pad_test: tests/pad_test.c src/platform_sdl2.c src/gfx.c $(wildcard src/*.h)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/pad_test.c src/platform_sdl2.c src/gfx.c $(LDLIBS)
+tests/pad_test: tests/pad_test.c src/platform_sdl2.c src/gfx.c src/touch.c src/compat.c $(wildcard src/*.h)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/pad_test.c src/platform_sdl2.c src/gfx.c src/touch.c src/compat.c $(LDLIBS)
 
 TEST_BINS := tests/png_dump $(if $(filter sdl2,$(BACKEND)),tests/pad_test)
 

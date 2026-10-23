@@ -1,4 +1,7 @@
 #include "audio.h"
+#ifdef __ANDROID__
+#include <SDL_system.h>
+#endif
 #include "classfile.h"
 #include "jar.h"
 #include "jvm.h"
@@ -39,7 +42,8 @@ static void usage(void)
         "  --sharp       только целое масштабирование\n"
         "  --gpu         рисовать через видеокарту (OpenGL); по умолчанию — программно,\n"
         "                это легче по памяти и надёжнее на старых ПК\n"
-        "  --mute        без звука\n\n"
+        "  --mute        без звука\n"
+        "  --touch       сенсорные кнопки поверх игры, как на Android (мышь — палец)\n\n"
         "BT_AUDIO_DUMP=файл.wav — записывать весь звук игры в файл.\n");
 }
 
@@ -205,6 +209,8 @@ static int parse_opts(int argc, char **argv, int start, PlatformConfig *cfg)
             cfg->software = 1;
         } else if (strcmp(argv[i], "--gpu") == 0) {
             cfg->software = 0;
+        } else if (strcmp(argv[i], "--touch") == 0) {
+            cfg->touch = 1;
         } else if (strcmp(argv[i], "--mute") == 0) {
             audio_set_master(0);
         } else {
@@ -255,7 +261,14 @@ static void default_games_dir(char *out, size_t cap)
     else if (xdg && *xdg)
         snprintf(out, cap, "%s/bt-j2me/games", xdg);
     else
-#ifdef _WIN32
+#ifdef __ANDROID__
+    {
+        /* Android/data/ru.flexiy0.btj2me/files/games: сюда же копирует импорт из MainActivity */
+        const char *ext = SDL_AndroidGetExternalStoragePath();
+        snprintf(out, cap, "%s/games", ext ? ext : bt_home());
+        bt_mkdir(out);
+    }
+#elif defined(_WIN32)
         /* на Windows — папка games рядом с bt-j2me.exe (при запуске двойным щелчком это текущая папка) */
         snprintf(out, cap, "games");
 #else
@@ -270,8 +283,13 @@ static int is_dir(const char *path)
 
 int main(int argc, char **argv)
 {
-    PlatformConfig cfg = { 240, 320, 1, SCALE_AUTO, 1, "BT-J2ME" };
+    PlatformConfig cfg = { 240, 320, 1, SCALE_AUTO, 1, "BT-J2ME", 0 };
     char dir[1024];
+
+#ifdef __ANDROID__
+    cfg.software = 0;   /* на телефоне рисует GPU (OpenGL ES): кнопки с прозрачностью — без нагрузки на CPU */
+    cfg.touch = 1;
+#endif
 
     if (argc >= 2 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)) {
         usage();

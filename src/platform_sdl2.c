@@ -1,8 +1,12 @@
 #include "platform.h"
+#include "touch.h"
 #include "util.h"
 
 #include <SDL.h>
 #include <stdlib.h>
+#ifdef __ANDROID__
+#include <jni.h>
+#endif
 
 #define QUEUE_LEN   32
 #define STICK_PRESS 16000   /* гистерезис, чтобы стик не «дребезжал» у порога */
@@ -13,6 +17,8 @@ static SDL_Renderer *ren;
 static SDL_Texture  *tex;
 static Image         screen;
 static ScaleMode     scale_mode;
+static int           touch_on;
+static volatile int  games_changed;   /* выставляет Java-часть Android после импорта */
 static Event         queue[QUEUE_LEN];
 static int           q_head, q_len;
 static int           stick_dir[4];   /* вверх, вниз, влево, вправо */
@@ -51,6 +57,11 @@ static void apply_scale(void)
 {
     int dw, dh, k;
 
+    if (touch_on) {
+        /* с сенсорными кнопками картинку размещает touch.c (в портрете — сверху) */
+        SDL_RenderSetLogicalSize(ren, 0, 0);
+        return;
+    }
     platform_display_size(&dw, &dh);
     k = dw / screen.w < dh / screen.h ? dw / screen.w : dh / screen.h;
     /* Логический размер + целый масштаб делает SDL; «авто» решаем сами. */
@@ -86,11 +97,31 @@ static void open_pad(int index)
     queue[(q_head + q_len - 1) % QUEUE_LEN].name = SDL_GameControllerName(gc);
 }
 
+static void touch_emit(EventType type, int key, int x, int y)
+{
+    push(type, key);
+    if (q_len) {
+        Event *e = &queue[(q_head + q_len - 1) % QUEUE_LEN];
+        e->x = x;
+        e->y = y;
+    }
+}
+
 int platform_init(const PlatformConfig *cfg)
 {
     Uint32 wflags = cfg->fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : SDL_WINDOW_RESIZABLE;
     Uint32 rflags = cfg->software ? SDL_RENDERER_SOFTWARE : SDL_RENDERER_ACCELERATED;
 
+    touch_on = cfg->touch;
+#ifdef __ANDROID__
+    touch_on = 1;
+    SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");   /* «назад» — в игру, а не закрыть приложение */
+    SDL_SetHint(SDL_HINT_ORIENTATIONS, "Portrait PortraitUpsideDown LandscapeLeft LandscapeRight");
+#endif
+    if (touch_on) {
+        SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");      /* пальцы — только пальцами */
+        SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "1");      /* мышь на ПК изображает палец */
+    }
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
         BT_LOG("SDL_Init: %s\n", SDL_GetError());
         return -1;
@@ -120,12 +151,16 @@ int platform_init(const PlatformConfig *cfg)
         return -1;
     }
     SDL_ShowCursor(cfg->fullscreen ? SDL_DISABLE : SDL_ENABLE);
+    if (touch_on)
+        touch_init(ren, touch_emit);
     /* Уже подключённые геймпады придут событиями SDL_CONTROLLERDEVICEADDED. */
     return platform_set_screen(cfg->width, cfg->height, cfg->scale);
 }
 
 void platform_shutdown(void)
 {
+    if (touch_on)
+        touch_shutdown();
     platform_audio_close();
     image_free(&screen);
     if (tex)
@@ -145,13 +180,83 @@ Image *platform_screen(void)
     return &screen;
 }
 
+static void render(void)
+{
+    SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);   /* поля вокруг экрана — чёрные */
+    SDL_RenderClear(ren);
+    if (touch_on) {
+        SDL_Rect dst;
+        int w, h;
+        platform_display_size(&w, &h);
+        touch_place(w, h, screen.w, screen.h, scale_mode, &dst);
+        SDL_RenderCopy(ren, tex, NULL, &dst);
+        touch_draw();
+    } else
+        SDL_RenderCopy(ren, tex, NULL, NULL);
+    SDL_RenderPresent(ren);
+}
+
 void platform_present(void)
 {
     SDL_UpdateTexture(tex, NULL, screen.px, screen.w * (int)sizeof(uint32_t));
-    SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);   /* поля вокруг экрана — чёрные */
-    SDL_RenderClear(ren);
-    SDL_RenderCopy(ren, tex, NULL, NULL);
-    SDL_RenderPresent(ren);
+    render();
+}
+
+void platform_touch_profile(const char *game_id)
+{
+    if (touch_on)
+        touch_profile(game_id);
+}
+
+#ifdef __ANDROID__
+/* Вызов метода MainActivity без аргументов. */
+static void activity_call(const char *method)
+{
+    JNIEnv *env = (JNIEnv *)SDL_AndroidGetJNIEnv();
+    jobject act = (jobject)SDL_AndroidGetActivity();
+    jclass cls;
+    jmethodID m;
+
+    if (!env || !act)
+        return;
+    cls = (*env)->GetObjectClass(env, act);
+    m = (*env)->GetMethodID(env, cls, method, "()V");
+    if (m)
+        (*env)->CallVoidMethod(env, act, m);
+    if ((*env)->ExceptionCheck(env))
+        (*env)->ExceptionClear(env);
+    (*env)->DeleteLocalRef(env, cls);
+    (*env)->DeleteLocalRef(env, act);
+}
+
+/* MainActivity сообщает: скопировали новые игры в папку. */
+JNIEXPORT void JNICALL Java_ru_flexiy0_btj2me_MainActivity_nativeGamesChanged(JNIEnv *env, jclass cls)
+{
+    (void)env;
+    (void)cls;
+    games_changed = 1;
+}
+
+int platform_can_import(void) { return 1; }
+void platform_import_games(void) { activity_call("importGames"); }
+
+void platform_text_input(int on)
+{
+    if (on)
+        SDL_StartTextInput();
+    else
+        SDL_StopTextInput();
+}
+#else
+int platform_can_import(void) { return 0; }
+void platform_import_games(void) {}
+void platform_text_input(int on) { (void)on; }   /* на ПК ввод текста включён всегда */
+#endif
+
+void platform_vibrate(int ms)
+{
+    if (touch_on)
+        touch_vibrate(ms);
 }
 
 /* Раскладка: стрелки/WASD — джойстик, Enter/пробел — огонь, цифры и numpad — как на телефоне,
@@ -226,13 +331,16 @@ static void translate(const SDL_Event *e)
         if (e->window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
             apply_scale();
         break;
+    case SDL_APP_DIDENTERFOREGROUND:
+        push(EV_REFRESH, 0);    /* вернулись из файлового менеджера — вдруг там добавили игры */
+        break;
     case SDL_KEYDOWN:
     case SDL_KEYUP:
         if (e->key.keysym.sym == SDLK_F10) {
             push(EV_QUIT, 0);
             break;
         }
-        if (e->key.keysym.sym == SDLK_ESCAPE) {
+        if (e->key.keysym.sym == SDLK_ESCAPE || e->key.keysym.sym == SDLK_AC_BACK) {
             if (e->type == SDL_KEYDOWN && !e->key.repeat)
                 push(EV_BACK, 0);
             break;
@@ -279,15 +387,23 @@ static void translate(const SDL_Event *e)
         else if (e->caxis.axis == SDL_CONTROLLER_AXIS_LEFTY)
             stick_axis(e->caxis.value, 0, 1, KEY_UP, KEY_DOWN);
         break;
+    case SDL_FINGERDOWN:
+    case SDL_FINGERMOTION:
+    case SDL_FINGERUP:
+        if (touch_on)
+            touch_event(e);
+        break;
     case SDL_MOUSEBUTTONDOWN:
     case SDL_MOUSEBUTTONUP:
+        if (touch_on)
+            break;      /* мышь уже пришла пальцем */
         /* При SDL_RenderSetLogicalSize координаты уже приведены к виртуальному экрану. */
         push(e->type == SDL_MOUSEBUTTONDOWN ? EV_POINTER_DOWN : EV_POINTER_UP, 0);
         queue[(q_head + q_len - 1) % QUEUE_LEN].x = e->button.x;
         queue[(q_head + q_len - 1) % QUEUE_LEN].y = e->button.y;
         break;
     case SDL_MOUSEMOTION:
-        if (e->motion.state & SDL_BUTTON_LMASK) {
+        if (!touch_on && (e->motion.state & SDL_BUTTON_LMASK)) {
             push(EV_POINTER_MOVE, 0);
             queue[(q_head + q_len - 1) % QUEUE_LEN].x = e->motion.x;
             queue[(q_head + q_len - 1) % QUEUE_LEN].y = e->motion.y;
@@ -300,8 +416,14 @@ int platform_poll(Event *ev)
 {
     SDL_Event e;
 
+    if (games_changed) {
+        games_changed = 0;
+        push(EV_REFRESH, 0);
+    }
     while (!q_len && SDL_PollEvent(&e))
         translate(&e);
+    if (touch_on && touch_dirty() && tex)
+        render();       /* кнопка нажалась или стик сдвинулся, а игра кадр не прислала */
     if (!q_len)
         return 0;
     *ev = queue[q_head];

@@ -182,6 +182,19 @@ void bt_dir_close(BtDir *d)
         closedir((DIR *)d);
 }
 
+#ifdef __ANDROID__
+#include <SDL_system.h>
+
+/* Android: настройки и сохранения — во внутренней памяти приложения (её не видно другим). */
+const char *bt_home(void)
+{
+    const char *p = SDL_AndroidGetInternalStoragePath();
+
+    return p ? p : ".";
+}
+
+const char *bt_appdata(void) { return SDL_AndroidGetInternalStoragePath(); }
+#else
 const char *bt_home(void)
 {
     const char *h = getenv("HOME");
@@ -190,5 +203,6 @@ const char *bt_home(void)
 }
 
 const char *bt_appdata(void) { return NULL; }
+#endif
 
 #endif

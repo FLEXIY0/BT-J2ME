@@ -66,3 +66,9 @@ int platform_audio_open(int rate, AudioMixFn mix)
 
 void platform_audio_lock(int on) { (void)on; }
 void platform_audio_close(void) {}
+
+void platform_touch_profile(const char *game_id) { (void)game_id; }
+int platform_can_import(void) { return 0; }
+void platform_import_games(void) {}
+void platform_text_input(int on) { (void)on; }
+void platform_vibrate(int ms) { (void)ms; }
