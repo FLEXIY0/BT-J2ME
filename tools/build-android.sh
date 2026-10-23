@@ -1,8 +1,8 @@
 #!/bin/sh
-# Сборка APK для Android: dist/bt-j2me.apk (armeabi-v7a, arm64-v8a, x86, x86_64; Android 5.0+).
+# Сборка APK для Android: dist/bt-j2me.apk (armeabi-v7a, arm64-v8a, x86, x86_64; Android 4.1+).
 #
 # Нужны JDK 17+, Android SDK (platforms;android-34, build-tools;34.0.0, cmake;3.22.1)
-# и NDK 26.3.11579264. Путь к SDK — ANDROID_HOME (или ANDROID_SDK_ROOT).
+# и NDK 23.2.8568313 (r23c — последний, что собирает под Android 4.1). Путь к SDK — ANDROID_HOME (или ANDROID_SDK_ROOT).
 # Исходники SDL2 скачиваются один раз в ~/.cache/bt-j2me. Gradle — из PATH или GRADLE.
 set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)

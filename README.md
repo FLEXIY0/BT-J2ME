@@ -61,11 +61,12 @@ sh tools/build-windows.sh    # dist/bt-j2me.exe и dist/bt-j2me-console.exe (с 
 
 ### Android
 
-APK для Android 5.0+ (armeabi-v7a, arm64-v8a, x86, x86_64) собирается из Linux:
+APK для Android 4.1 Jelly Bean и новее (armeabi-v7a, x86; на 64-битных телефонах — arm64-v8a,
+x86_64) собирается из Linux. 4.1 — нижний предел: SDL2 нужны EGL и OpenGL ES 2.0:
 
 ```sh
 # нужны JDK 17+, Android SDK (platforms;android-34, build-tools;34.0.0, cmake;3.22.1)
-# и NDK 26.3.11579264; ANDROID_HOME — путь к SDK
+# и NDK 23.2.8568313 (r23c — последний, что собирает под 4.1); ANDROID_HOME — путь к SDK
 sh tools/build-android.sh    # dist/bt-j2me.apk
 ```
 

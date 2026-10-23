@@ -7,11 +7,11 @@ plugins {
 android {
     namespace 'ru.flexiy0.btj2me'
     compileSdk 34
-    ndkVersion '26.3.11579264'
+    ndkVersion '23.2.8568313'   // r23c — последний NDK, что собирает под Android 4.1
 
     defaultConfig {
         applicationId 'ru.flexiy0.btj2me'
-        minSdk 21            // Android 5.0: младше NDK r26 не собирает
+        minSdk 16            // Android 4.1 Jelly Bean — ниже не пускает SDL2 (EGL/GLES2); 64-битные ABI сами от 5.0
         targetSdk 34
         versionCode 1
         versionName '0.1'

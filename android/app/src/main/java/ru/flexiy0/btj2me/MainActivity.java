@@ -4,6 +4,7 @@ import android.content.ClipData;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
 import android.util.Log;
@@ -14,6 +15,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 import org.libsdl.app.SDLActivity;
 
@@ -47,15 +49,21 @@ public class MainActivity extends SDLActivity {
     public void importGames() {
         runOnUiThread(new Runnable() {
             public void run() {
-                Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                Intent i;
+                if (Build.VERSION.SDK_INT >= 19) {
+                    i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                    i.putExtra(Intent.EXTRA_MIME_TYPES, new String[] { "application/java-archive",
+                            "application/x-java-archive", "text/vnd.sun.j2me.app-descriptor",
+                            "application/octet-stream", "application/zip" });
+                } else {
+                    i = new Intent(Intent.ACTION_GET_CONTENT);   /* Android 4.1–4.3: обычный выбор файла */
+                }
                 i.addCategory(Intent.CATEGORY_OPENABLE);
                 i.setType("*/*");
-                i.putExtra(Intent.EXTRA_MIME_TYPES, new String[] { "application/java-archive",
-                        "application/x-java-archive", "text/vnd.sun.j2me.app-descriptor", "application/octet-stream",
-                        "application/zip" });
-                i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+                if (Build.VERSION.SDK_INT >= 18)
+                    i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
                 try {
-                    startActivityForResult(i, PICK_GAMES);
+                    startActivityForResult(Intent.createChooser(i, null), PICK_GAMES);
                 } catch (Exception e) {
                     Log.w(TAG, "нет выбора файлов", e);
                 }
@@ -143,7 +151,7 @@ public class MainActivity extends SDLActivity {
     /* Копирует JAR или JAD в папку игр. Файл без расширения, но с ZIP внутри, считаем JAR-ом. */
     private boolean copy(Uri uri) {
         String name = displayName(uri);
-        String lower = name.toLowerCase();
+        String lower = name.toLowerCase(Locale.ROOT);
         InputStream in = null;
         OutputStream out = null;
         File tmp = null;

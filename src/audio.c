@@ -1358,7 +1358,7 @@ int snd_create(const uint8_t *data, size_t len, int kind)
 
 int snd_create_freq(int hz, int ms)
 {
-    int i = alloc_slot(), note = hz > 0 ? (int)lround(69 + 12 * log2(hz / 440.0)) : -1;
+    int i = alloc_slot(), note = hz > 0 ? (int)lround(69 + 12 * log(hz / 440.0) / log(2.0))   /* log2 в Android 4.1 нет */ : -1;
     uint32_t dur = (uint32_t)(ms > 0 ? ms : 1) * 1000u;
     EvList l = { NULL, 0, 0 };
 
