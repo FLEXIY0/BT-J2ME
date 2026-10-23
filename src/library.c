@@ -241,6 +241,13 @@ void library_load_cover(const Library *lib, Game *g, int w, int h)
         snprintf(path, sizeof(path), "%s/covers/%s.png", lib->dir, g->base);
         src = load_png_file(path);
     }
+    if (!src.px) {
+        /* своей обложки нет — заставка «нажмите, чтобы играть», снятая при первом запуске */
+        char data[800];
+        bt_data_dir(data, sizeof(data));
+        snprintf(path, sizeof(path), "%s/shots/%s/title.png", data, g->base);
+        src = load_png_file(path);
+    }
     image_free(&g->cover);
     if (src.px) {
         Image crop = crop_to_aspect(&src, w, h);

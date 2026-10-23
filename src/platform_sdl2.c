@@ -385,6 +385,11 @@ static void translate(const SDL_Event *e)
             push(EV_QUIT, 0);
             break;
         }
+        if (e->key.keysym.sym == SDLK_F12) {
+            if (e->type == SDL_KEYDOWN && !e->key.repeat)
+                push(EV_SCREENSHOT, 0);
+            break;
+        }
         if (e->key.keysym.sym == SDLK_ESCAPE || e->key.keysym.sym == SDLK_AC_BACK) {
             if (e->type == SDL_KEYDOWN && !e->key.repeat)
                 push(EV_BACK, 0);
@@ -471,6 +476,8 @@ int platform_poll(Event *ev)
         touch_tick(SDL_GetTicks());
         if (touch_take_restart())
             push(EV_RESTART, 0);
+        if (touch_take_shot())
+            push(EV_SCREENSHOT, 0);
     }
     if (touch_on && touch_dirty() && tex)
         render();       /* кнопка нажалась или стик сдвинулся, а игра кадр не прислала */

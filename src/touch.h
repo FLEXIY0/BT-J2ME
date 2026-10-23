@@ -36,5 +36,7 @@ void touch_text_input(int on);
 /* Широкоэкранный режим игры и запрос перезапуска после его смены в редакторе. */
 int  touch_wide(void);
 int  touch_take_restart(void);
+/* Нажали кнопку снимка экрана. */
+int  touch_take_shot(void);
 
 #endif

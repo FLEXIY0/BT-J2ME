@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 
 /* ---------- состояние запуска ---------- */
 
@@ -36,6 +37,9 @@ static struct {
     Manifest  mf, jad;
     int       have_mf, have_jad;
     int       wide, ow, oh;     /* широкоэкранный режим: исходный размер игры */
+    char      shots[1100];      /* папка скриншотов игры */
+    uint32_t  t_start;
+    int       title_done;       /* снимок «нажмите, чтобы играть» уже есть */
     char      rms_dir[1024];
     MEvent    q[EVQ_LEN];
     int       q_head, q_len;
@@ -1098,6 +1102,60 @@ static uint8_t *wide_filter(const char *path, uint8_t *data, size_t *len)
     return (uint8_t *)out;
 }
 
+/* ---------- скриншоты: из них в лаунчере делают обложку ---------- */
+
+static void shots_dir_for(const char *save_id)
+{
+    char base[800], id[256];
+    size_t i;
+
+    snprintf(id, sizeof(id), "%s", save_id);
+    for (i = 0; id[i]; i++)
+        if (id[i] == '/' || id[i] == '\\')
+            id[i] = '_';
+    bt_data_dir(base, sizeof(base));
+    snprintf(M.shots, sizeof(M.shots), "%s/shots/%s", base, id);
+}
+
+/* Текущий кадр игры — в PNG. name NULL — снимок с датой. */
+static int save_shot(const char *name)
+{
+    Image *scr = platform_screen();
+    char path[1300], stamp[64];
+    uint8_t *png;
+    size_t len;
+    FILE *f;
+    int ok = 0;
+
+    if (!name) {
+        time_t now = time(NULL);
+        strftime(stamp, sizeof(stamp), "shot-%Y%m%d-%H%M%S.png", localtime(&now));
+        name = stamp;
+    }
+    bt_mkdirs(M.shots);
+    snprintf(path, sizeof(path), "%s/%s", M.shots, name);
+    if (!scr->px || !(png = png_encode(scr->px, scr->w, scr->h, &len)))
+        return 0;
+    if ((f = bt_fopen(path, "wb")) != NULL) {
+        ok = fwrite(png, 1, len, f) == len;
+        ok &= fclose(f) == 0;
+    }
+    free(png);
+    if (ok)
+        BT_LOG("снимок: %s\n", path);
+    return ok;
+}
+
+/* Первое нажатие игрока (не раньше чем через 2,5 с) почти всегда приходится на заставку
+ * «нажмите, чтобы играть» — её и запоминаем как обложку по умолчанию. */
+static void maybe_title_shot(void)
+{
+    if (M.title_done || M.frames < 5 || jvm_now() - M.t_start < 2500)
+        return;
+    M.title_done = 1;
+    save_shot("title.png");
+}
+
 /* <игра>.jad рядом с JAR: в нём бывают свойства, без которых игра не стартует. */
 static void load_jad(const char *jar)
 {
@@ -1171,6 +1229,17 @@ MidpResult midp_run(const char *jar, const char *save_id, ScaleMode scale, char 
     load_jad(jar);
     screen_size_from_manifest();
     rms_dir_for(save_id);
+    shots_dir_for(save_id);
+    {
+        char tp[1200];
+        FILE *tf;
+        snprintf(tp, sizeof(tp), "%s/title.png", M.shots);
+        if ((tf = bt_fopen(tp, "rb")) != NULL) {
+            M.title_done = 1;
+            fclose(tf);
+        }
+    }
+    M.t_start = jvm_now();
     platform_touch_profile(save_id);
     if (platform_touch_wide()) {
         wide_size();
@@ -1208,12 +1277,17 @@ MidpResult midp_run(const char *jar, const char *save_id, ScaleMode scale, char 
                 }
                 break;
             case EV_KEY_DOWN:
+                maybe_title_shot();
                 key_down(ev.key, ev.printable);
+                break;
+            case EV_SCREENSHOT:
+                save_shot(NULL);
                 break;
             case EV_KEY_UP:
                 key_up(ev.key);
                 break;
             case EV_POINTER_DOWN:
+                maybe_title_shot();
                 evq_push(MEV_PTR_DOWN, ev.x, ev.y);
                 break;
             case EV_POINTER_UP:

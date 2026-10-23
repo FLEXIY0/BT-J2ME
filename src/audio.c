@@ -1537,6 +1537,18 @@ void snd_tone(int note, int ms, int volume)
     snd_play(h);
 }
 
+void snd_play_once(const uint8_t *data, size_t len, int volume)
+{
+    int h = snd_create(data, len, SND_AUTO);
+    Sound *s = get(h);
+
+    if (!s)
+        return;
+    s->temp = 1;
+    snd_set_volume(h, volume);
+    snd_play(h);
+}
+
 /* ---------- audio-render ---------- */
 
 int audio_render_file(const char *in, const char *out, int kind)

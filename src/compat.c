@@ -206,3 +206,31 @@ const char *bt_appdata(void) { return NULL; }
 #endif
 
 #endif
+
+void bt_data_dir(char *out, size_t cap)
+{
+    const char *xdg = getenv("XDG_DATA_HOME"), *app = bt_appdata();
+
+    if (xdg && *xdg)
+        snprintf(out, cap, "%s/bt-j2me", xdg);
+    else if (app)
+        snprintf(out, cap, "%s/bt-j2me", app);
+    else
+        snprintf(out, cap, "%s/.local/share/bt-j2me", bt_home());
+}
+
+void bt_mkdirs(const char *path)
+{
+    char buf[1024];
+    size_t i;
+
+    snprintf(buf, sizeof(buf), "%s", path);
+    for (i = 1; buf[i]; i++)
+        if (buf[i] == '/' || buf[i] == '\\') {
+            char c = buf[i];
+            buf[i] = '\0';
+            bt_mkdir(buf);
+            buf[i] = c;
+        }
+    bt_mkdir(buf);
+}

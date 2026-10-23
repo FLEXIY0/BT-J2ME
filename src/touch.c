@@ -14,13 +14,13 @@
 #define KEY_SLOTS   80          /* коды клавиш -8..57 → индекс key + 16 */
 #define TEX_CACHE   96
 
-enum { E_KEY, E_STICK, E_PAD, E_MENU };
+enum { E_KEY, E_STICK, E_PAD, E_MENU, E_SHOT };
 enum { F_NONE, F_KEY, F_PANEL, F_STICK, F_POINTER, F_EDIT_DRAG, F_EDIT_UI, F_KBD };
 enum { P_NONE, P_KEYPAD, P_KEYBOARD };
 
 /* Подписи, которых нет среди кодов клавиш */
 enum { L_PAD = 1000, L_MENU, L_STICK, L_KNOB, L_PLUS, L_MINUS, L_EYE, L_CHECK, L_RESET, L_TRASH,
-       L_SIZE, L_WAY4, L_WAY8, L_WIDE, L_TALL, L_SHIFT, L_SHIFT_ON, L_BKSP, L_123, L_ABC, L_RU, L_EN, L_SPACE, L_ENTER, L_DOT,
+       L_SIZE, L_WAY4, L_WAY8, L_WIDE, L_TALL, L_CAMERA, L_SHIFT, L_SHIFT_ON, L_BKSP, L_123, L_ABC, L_RU, L_EN, L_SPACE, L_ENTER, L_DOT,
        L_CHAR = 2000 /* + код символа */ };
 enum { S_NORMAL, S_PRESSED, S_CHIP, S_CHIP_ON };
 
@@ -60,7 +60,7 @@ static struct {
     char          id[256];
     Layout        lay[2];       /* 0 — портрет, 1 — альбом */
     float         opacity;
-    int           four_way, wide, wide_saved, restart;
+    int           four_way, wide, wide_saved, restart, shot, flash_t;
     int           W, H, gw, gh;
     SDL_Rect      g;            /* где картинка игры */
     Finger        f[MAX_FINGERS];
@@ -90,7 +90,7 @@ static void elem_size(const Elem *e, float *w, float *h)
 
     switch (e->type) {
     case E_STICK: *w = *h = 34 * u; break;
-    case E_PAD: case E_MENU: *w = *h = 10 * u; break;
+    case E_PAD: case E_MENU: case E_SHOT: *w = *h = 10 * u; break;
     default:
         if (e->key == KEY_FIRE)
             *w = *h = 24 * u;
@@ -150,6 +150,7 @@ static void default_layout(int o)
         add(L, E_STICK, 0, 0.28f, (z0 + zh * 0.58f) / H, s);
         add(L, E_KEY, KEY_FIRE, 0.76f, (z0 + zh * 0.58f) / H, s);
         add(L, E_PAD, 0, 0.5f, (z0 + zh * 0.9f) / H, 1);
+        add(L, E_SHOT, 0, 0.85f, (z0 + zh * 0.9f) / H, 1);
     } else {
         float side = (float)T.g.x, lx, s;
         if (side < W * 0.16f)
@@ -160,6 +161,7 @@ static void default_layout(int o)
         add(L, E_KEY, KEY_SOFT_RIGHT, 1 - lx / W, 0.13f, 1);
         add(L, E_MENU, 0, lx / W, 0.38f, 1);
         add(L, E_PAD, 0, 1 - lx / W, 0.38f, 1);
+        add(L, E_SHOT, 0, 1 - lx / W, 0.93f, 0.85f);
         add(L, E_STICK, 0, lx / W, 0.72f, s);
         add(L, E_KEY, KEY_FIRE, 1 - lx / W, 0.72f, s);
     }
@@ -233,7 +235,7 @@ static void profile_load(void)
             T.lay[o].valid = 1;
             T.lay[o].n = 0;
         } else if (o >= 0 && sscanf(line, "e %d %d %f %f %f", &e.type, &e.key, &e.x, &e.y, &e.s) == 5 &&
-                   e.type >= E_KEY && e.type <= E_MENU)
+                   e.type >= E_KEY && e.type <= E_SHOT)
             add(&T.lay[o], e.type, e.key, clampf(e.x, 0, 1), clampf(e.y, 0, 1), clampf(e.s, 0.4f, 2.5f));
     }
     fclose(f);
@@ -319,6 +321,8 @@ static const char *const ic_eye[] = { "...#####...", ".##.....##.", "#...###...#
                                       ".##.....##.", "...#####..." };
 static const char *const ic_size[] = { "###...###", "##.....##", "#.#...#.#", ".........", ".........",
                                        ".........", "#.#...#.#", "##.....##", "###...###" };
+static const char *const ic_camera[] = { "...###...", "#########", "#..###..#", "#.#...#.#", "#.#...#.#",
+                                         "#..###..#", "#########" };
 static const char *const ic_pad[] = { "##.##.##", "##.##.##", "........", "##.##.##", "##.##.##", "........",
                                       "##.##.##", "##.##.##" };
 static const char *const ic_arrow[] = { "...#...", "..###..", ".#####.", "#######", "..###..", "..###..", "..###.." };
@@ -393,6 +397,7 @@ static void draw_label(Image *im, int label, int w, int h, uint32_t c)
     case KEY_POUND: text_center(im, "#", cx, cy, m, c); break;
     case KEY_CLEAR: text_center(im, "C", cx, cy, m, c); break;
     case L_PAD:   ICON(ic_pad, 0); break;
+    case L_CAMERA: ICON(ic_camera, 0); break;
     case L_MENU:  ICON(ic_gear, 0); break;
     case L_PLUS:  ICON(ic_plus, 0); break;
     case L_MINUS: ICON(ic_minus, 0); break;
@@ -829,7 +834,7 @@ static int elem_visible(const Elem *e)
 {
     if (!T.panel || T.edit)
         return 1;
-    return e->type == E_MENU || e->type == E_PAD ||
+    return e->type == E_MENU || e->type == E_PAD || e->type == E_SHOT ||
            (e->type == E_KEY && (e->key == KEY_SOFT_LEFT || e->key == KEY_SOFT_RIGHT));
 }
 
@@ -1010,6 +1015,8 @@ static int editor_items(Item *it, int cap, SDL_Rect *panel)
         PUT(A_ADD, -100 - E_STICK, L_STICK);
     if (!has_key(E_PAD, 0))
         PUT(A_ADD, -100 - E_PAD, L_PAD);
+    if (!has_key(E_SHOT, 0))
+        PUT(A_ADD, -100 - E_SHOT, L_CAMERA);
 #undef PUT
     panel->x = 0;
     panel->y = 0;
@@ -1158,6 +1165,10 @@ static void down(Finger *f, float x, float y)
             T.kb_auto = 0;
             if (T.panel)
                 stick_end();
+            vibrate();
+        } else if (e->type == E_SHOT) {
+            T.shot = 1;
+            T.flash_t = (int)SDL_GetTicks();
             vibrate();
         } else if (e->type == E_MENU) {
             release_all();
@@ -1338,7 +1349,7 @@ void touch_draw(void)
                 blit(L_KNOB, k, S_NORMAL, a * 0.8f);
             }
         } else {
-            int label = e->type == E_PAD ? L_PAD : e->type == E_MENU ? L_MENU : e->key;
+            int label = e->type == E_PAD ? L_PAD : e->type == E_MENU ? L_MENU : e->type == E_SHOT ? L_CAMERA : e->key;
             int pressed = e->type == E_KEY && T.keycount[e->key + 16 < 0 ? 0 : e->key + 16] > 0;
             if (e->type == E_PAD && T.panel)
                 pressed = 1;
@@ -1353,6 +1364,12 @@ void touch_draw(void)
                 s.x--; s.y--; s.w += 2; s.h += 2;
             }
         }
+    }
+    if (T.flash_t && SDL_GetTicks() - (Uint32)T.flash_t < 180) {   /* «щелчок затвора» над картинкой игры */
+        SDL_SetRenderDrawBlendMode(T.ren, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(T.ren, 255, 255, 255, (Uint8)(160 - (SDL_GetTicks() - (Uint32)T.flash_t) * 160 / 180));
+        SDL_RenderFillRect(T.ren, &T.g);
+        T.dirty = 1;
     }
     if (T.panel && !T.edit) {
         PItem it[64];
@@ -1391,6 +1408,14 @@ int touch_dirty(void)
 int touch_wide(void)
 {
     return T.game && T.wide;
+}
+
+int touch_take_shot(void)
+{
+    int r = T.shot;
+
+    T.shot = 0;
+    return r;
 }
 
 int touch_take_restart(void)

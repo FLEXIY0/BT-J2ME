@@ -3,6 +3,8 @@
 #include "library.h"
 #include "midp.h"
 #include "compat.h"
+#include "png.h"
+#include "audio.h"
 #include "util.h"
 
 #include <math.h>
@@ -16,7 +18,7 @@
 
 #define REPEAT_DELAY 330
 #define REPEAT_RATE  110
-#define LAUNCH_MS    1700
+#define LAUNCH_MS    (ui->fx == FX_SHATTER ? 3300 : 1700)   /* длительность анимации запуска */
 #define KEEP_COVERS  24     /* обложки дальше этого от выбранной выгружаем — память важнее */
 #define BOX_ASPECT   0.72f  /* коробка как у игр для приставок: ширина / высота */
 #define SIDE_SCALE   0.84f
@@ -60,6 +62,11 @@ typedef struct {
     int          held, held_since, last_repeat;
     int          pad_connected;
     Image        snap;          /* кадр полки в момент запуска — из него строится анимация */
+    /* редактор обложки: скриншот игры и рамка кадрирования (в пикселях скриншота) */
+    int          ce, ce_n, ce_i, ce_drag;
+    char         ce_files[48][64];
+    Image        ce_img;
+    float        ce_cx, ce_cy, ce_cw, ce_dx, ce_dy;
     int          fx;            /* вид анимации запуска */
     int          ptr_down, ptr_x0, ptr_y0, ptr_x, ptr_y;   /* касание: тап или свайп решаем при отпускании */
     uint32_t     pad_flash;
@@ -103,6 +110,28 @@ static const Icon icon_folder = { 13, 10, {
     "#####........", "#...#........", "#############", "#...........#",
     "#...........#", "#...........#", "#...........#", "#...........#",
     "#...........#", "#############" } };
+
+static const Icon icon_picture = { 11, 9, {
+    "###########", "#.........#", "#......##.#", "#......##.#", "#..#......#",
+    "#.###...#.#", "#######.###", "###########", "..........." } };
+static const Icon icon_plus = { 9, 9, {
+    "....#....", "....#....", "....#....", "....#....", "#########",
+    "....#....", "....#....", "....#....", "....#...." } };
+static const Icon icon_minus = { 9, 9, {
+    ".........", ".........", ".........", ".........", "#########",
+    ".........", ".........", ".........", "........." } };
+static const Icon icon_check = { 9, 9, {
+    ".........", "........#", ".......##", "#.....##.", "##...##..",
+    ".##.##...", "..###....", "...#.....", "........." } };
+static const Icon icon_cross = { 9, 9, {
+    "#.......#", ".#.....#.", "..#...#..", "...#.#...", "....#....",
+    "...#.#...", "..#...#..", ".#.....#.", "#.......#" } };
+static const Icon icon_trash = { 9, 9, {
+    "...###...", "#########", ".#.....#.", ".#.#.#.#.", ".#.#.#.#.",
+    ".#.#.#.#.", ".#.#.#.#.", ".#.....#.", "..#####.." } };
+static const Icon icon_camera = { 11, 9, {
+    "...###.....", "###########", "#...###...#", "#..#...#..#", "#..#...#..#",
+    "#..#...#..#", "#...###...#", "###########", "..........." } };
 
 static void draw_icon(Image *d, const Icon *ic, int x, int y, int s, uint32_t c, int flip)
 {
@@ -496,6 +525,7 @@ static void draw_counter(Ui *ui, int cur, int total)
 }
 
 static void draw_add_tile(Ui *ui, int x, int y, int w, int h);
+static void ce_open(Ui *ui);
 
 static void draw_play(Ui *ui, uint32_t now)
 {
@@ -532,6 +562,8 @@ static void draw_play(Ui *ui, uint32_t now)
         }
     }
     draw_counter(ui, ui->sel + 1, n);
+    /* слева вверху — «картинка»: сменить обложку на кадр из игры */
+    draw_icon(s, &icon_picture, ui->m, ui->m - 1, 1, ui->th->sub, 0);
     draw_title(ui, &ui->lib.games[ui->sel], ui->title_y, 1);
 }
 
@@ -871,42 +903,117 @@ static void launch_fx(Ui *ui, float t, uint32_t now)
         break;
     }
     default: {
-        /* рассыпание: от коробки бежит волна, полка осыпается крупными «плитками» */
+        /* Запуск по шагам, чтобы каждое действие читалось:
+         * 0–0.08   отклик: коробка проседает под пальцем, от неё идёт ударная волна;
+         * 0.03–0.42 полка осыпается плитками за волной, коробка стоит и светится;
+         * 0.42–0.55 пауза: коробка одна в темноте, с ореолом, отрывается и чуть поворачивается;
+         * 0.55–0.9  выплывает в центр, растёт, раскручивается и растворяется в искры;
+         * 0.9–1     темнота перед игрой. */
+        static const uint8_t bayer[16] = { 0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5 };
         int b = imax(6, ui->W / 12), x, y;
-        float maxd = sqrtf((float)(ui->W * ui->W + ui->H * ui->H));
+        float maxd = sqrtf((float)(ui->W * ui->W + ui->H * ui->H)), wave = smooth((t - 0.02f) / 0.32f);
         gfx_fill(s, 0, 0, ui->W, ui->H, 0xFF0B0A10u);
         for (y = 0; y < ui->H; y += b)
             for (x = 0; x < ui->W; x += b) {
                 float mx = (float)x + (float)b / 2, my = (float)y + (float)b / 2;
                 float d = sqrtf((mx - cx) * (mx - cx) + (my - cy) * (my - cy)) / maxd;
-                int inbox = mx >= bx && mx < bx + bw && my >= by && my < by + bh;
                 float delay, lt, vx, vy, ox, oy, sc;
                 int sz;
+                if (mx >= bx && mx < bx + bw && my >= by && my < by + bh)
+                    continue;               /* коробку рисуем отдельно, целиком */
                 fx_seed = (uint32_t)(x * 7919 + y * 104729 + 1);
-                vx = inbox ? (mx - cx) / (float)bw * 2.2f + (fx_frand() - 0.5f) : (fx_frand() - 0.5f) * 0.5f;
-                vy = inbox ? (my - cy) / (float)bh * 1.6f - 1.2f : -0.2f - fx_frand() * 0.4f;
-                delay = inbox ? 0.4f + fx_frand() * 0.06f : d * 0.7f + fx_frand() * 0.05f;
-                lt = (t - delay) / 0.55f;
+                vx = ((mx - cx) / maxd * 2 + (fx_frand() - 0.5f)) * 0.5f;    /* волна толкает от коробки */
+                vy = -0.35f - fx_frand() * 0.5f;
+                delay = 0.03f + d * 0.3f + fx_frand() * 0.03f;
+                lt = (t - delay) / 0.3f;
                 if (lt >= 1)
                     continue;
                 if (lt < 0)
                     lt = 0;
-                /* плитка падает с ускорением и уменьшается — будто летит вниз и от камеры */
                 ox = vx * lt * (float)ui->W * 0.35f;
-                oy = (vy * lt + 2.6f * lt * lt) * (float)ui->H * 0.3f;
-                sc = inbox ? 1 + lt * 0.8f : 1 - lt * 0.45f;
+                oy = (vy * lt + 2.8f * lt * lt) * (float)ui->H * 0.3f;
+                sc = 1 - lt * 0.5f;
                 sz = imax(1, (int)((float)b * sc));
                 fx_stretch(s, src, (float)x, (float)y, (float)b, (float)b,
                            (int)(mx + ox - (float)sz / 2), (int)(my + oy - (float)sz / 2), sz, sz);
             }
-        if (t > 0.38f && t < 0.52f)     /* «взрыв» коробки — короткая вспышка */
-            fx_flash(s, 0.45f * (1 - fabsf(t - 0.45f) / 0.07f));
-        if (t > 0.85f)
-            gfx_fill(s, 0, 0, ui->W, ui->H, ((uint32_t)(smooth((t - 0.85f) / 0.15f) * 255) << 24));
+        if (wave > 0 && wave < 1) {         /* ударная волна — кольцо от коробки */
+            float rr = wave * maxd;
+            int k;
+            for (k = 0; k < 360; k += 2) {
+                float a = (float)k * 0.01745f;
+                fx_line(s, cx + cosf(a) * (rr - 3), cy + sinf(a) * (rr - 3), cx + cosf(a) * rr, cy + sinf(a) * rr,
+                        0xF4F0FF, (unsigned)(200 * (1 - wave)));
+            }
+        }
+        {
+            float go = smooth((t - 0.55f) / 0.3f), lift = smooth((t - 0.42f) / 0.13f);
+            float ang = t < 0.42f ? 0 : 0.35f * smooth((t - 0.42f) / 0.13f) +
+                        6.2832f * 1.6f * (t > 0.55f ? (t - 0.55f) * (t - 0.55f) / 0.1225f : 0);
+            float press = t < 0.08f ? sinf(t / 0.08f * 3.1416f) : 0;     /* проседание под пальцем */
+            float ccx = cx + ((float)ui->W / 2 - cx) * go;
+            float ccy = cy - lift * (float)bh * 0.06f + ((float)ui->H / 2 - cy) * go + press * 3;
+            float k = (1 - 0.05f * press) * (1 + 0.45f * go), cs = cosf(ang);
+            float dis = smooth((t - 0.72f) / 0.18f), glow = smooth((t - 0.1f) / 0.3f) * (1 - dis);
+            int ww = (int)((float)bw * k * fabsf(cs)), hh = (int)((float)bh * k), x0, y0, i, j;
+            /* ореол: мягкое свечение за коробкой */
+            if (glow > 0) {
+                int rmax = (int)((float)imax(bw, bh) * k * 0.9f), r;
+                for (r = rmax; r > 0; r -= 2) {
+                    float f = 1 - (float)r / (float)rmax;
+                    unsigned al = (unsigned)(glow * f * f * 60);
+                    int st;
+                    for (st = 0; st < 64; st++) {
+                        float a = (float)st * 6.2832f / 64;
+                        px_blend(s, (int)(ccx + cosf(a) * (float)r), (int)(ccy + sinf(a) * (float)r), 0x9C8FF0, al);
+                    }
+                }
+            }
+            x0 = (int)(ccx - (float)ww / 2);
+            y0 = (int)(ccy - (float)hh / 2);
+            fx_seed = (uint32_t)(now / 40);
+            for (j = 0; j < hh && ww > 0; j++) {
+                int py = y0 + j, sy2 = by + j * bh / hh;
+                if (py < 0 || py >= ui->H || sy2 < 0 || sy2 >= ui->H)
+                    continue;
+                for (i = 0; i < ww; i++) {
+                    int px = x0 + i, sx2 = cs >= 0 ? bx + i * bw / ww : bx + bw - 1 - i * bw / ww;
+                    uint32_t c;
+                    if (px < 0 || px >= ui->W || sx2 < 0 || sx2 >= ui->W)
+                        continue;
+                    c = src->px[sy2 * ui->W + sx2];
+                    if ((float)bayer[(py & 3) * 4 + (px & 3)] / 16.0f < dis) {
+                        /* растворился пиксель — иногда он вспыхивает искрой и улетает вверх */
+                        if ((fx_rand() & 63) == 0)
+                            px_blend(s, px + (int)((fx_frand() - 0.5f) * 6), py - (int)(fx_frand() * 18 * dis),
+                                     0xF4F0FF, 220);
+                        continue;
+                    }
+                    if (cs < 0)             /* обратная сторона коробки темнее */
+                        c = 0xFF000000u | ((c >> 1) & 0x7F7F7Fu);
+                    if (fabsf(cs) < 0.35f)  /* на ребре — блик */
+                        c = gfx_mix(c, 0xFFF4F0FFu, (unsigned)((0.35f - fabsf(cs)) / 0.35f * 170));
+                    s->px[py * ui->W + px] = c;
+                }
+            }
+        }
+        if (t > 0.9f)
+            gfx_fill(s, 0, 0, ui->W, ui->H, ((uint32_t)(smooth((t - 0.9f) / 0.1f) * 255) << 24));
         break;
     }
     }
     (void)now;
+}
+
+/* Нажали «играть»: отклик вибрацией и короткий «загрузочный» аккорд, как у приставок. */
+static void start_launch(Ui *ui, uint32_t now)
+{
+    /* тоновая последовательность JSR-135: темп 240, единица 1/64; арпеджио, пауза, финальный звон */
+    static const uint8_t chime[] = { 0xFE, 1, 0xFD, 60, 0xFC, 64,
+                                     67, 6, 72, 6, 76, 6, 79, 6, 84, 14, 0xFF, 92, 88, 22, 91, 30 };
+    ui->launch_t0 = now;
+    platform_vibrate(25);
+    snd_play_once(chime, sizeof(chime), 55);
 }
 
 static void draw_launch_overlay(Ui *ui, uint32_t now)
@@ -1053,8 +1160,10 @@ static void on_key(Ui *ui, int key, uint32_t now)
             ui->held = 1;
         } else if (key == KEY_DOWN || key == KEY_NUM0 + 8) {
             ui->focus_tabs = 1;
+        } else if (key == KEY_NUM0) {       /* 0 (View на геймпаде) — сменить обложку */
+            ce_open(ui);
         } else if ((key == KEY_FIRE || key == KEY_SOFT_LEFT || key == KEY_NUM0 + 5) && ui->lib.count) {
-            ui->launch_t0 = now;
+            start_launch(ui, now);
         }
         break;
     case TAB_LIBRARY:
@@ -1087,6 +1196,276 @@ static void on_key(Ui *ui, int key, uint32_t now)
     }
 }
 
+/* ---------- редактор обложки: свой кадр из скриншотов игры ---------- */
+
+enum { CE_PREV, CE_NEXT, CE_SMALLER, CE_BIGGER, CE_RESET, CE_CANCEL, CE_SAVE, CE_COUNT };
+
+static void shots_dir(const Game *g, char *out, size_t cap)
+{
+    char data[800];
+
+    bt_data_dir(data, sizeof(data));
+    snprintf(out, cap, "%s/shots/%s", data, g->base);
+}
+
+static float ce_aspect(const Ui *ui)
+{
+    return (float)ui->cover_w / (float)imax(1, ui->cover_h);
+}
+
+/* Рамка не вылезает за кадр и не больше него. */
+static void ce_clamp(Ui *ui)
+{
+    float a = ce_aspect(ui), maxw = fminf((float)ui->ce_img.w, (float)ui->ce_img.h * a), ch;
+
+    ui->ce_cw = clampf(ui->ce_cw, 16, maxw);
+    ch = ui->ce_cw / a;
+    ui->ce_cx = clampf(ui->ce_cx, ui->ce_cw / 2, (float)ui->ce_img.w - ui->ce_cw / 2);
+    ui->ce_cy = clampf(ui->ce_cy, ch / 2, (float)ui->ce_img.h - ch / 2);
+}
+
+static void ce_load(Ui *ui)
+{
+    char dir[1100], path[1200];
+    uint8_t *buf = NULL;
+    long len;
+    FILE *f;
+    int w, h;
+    uint32_t *px = NULL;
+
+    image_free(&ui->ce_img);
+    if (!ui->ce_n)
+        return;
+    shots_dir(&ui->lib.games[ui->sel], dir, sizeof(dir));
+    snprintf(path, sizeof(path), "%s/%s", dir, ui->ce_files[ui->ce_i]);
+    if ((f = bt_fopen(path, "rb")) != NULL) {
+        if (fseek(f, 0, SEEK_END) == 0 && (len = ftell(f)) > 0 && fseek(f, 0, SEEK_SET) == 0 &&
+            (buf = malloc((size_t)len)) != NULL && fread(buf, 1, (size_t)len, f) == (size_t)len)
+            px = png_decode(buf, (size_t)len, &w, &h);
+        free(buf);
+        fclose(f);
+    }
+    if (!px)
+        return;
+    ui->ce_img.px = px;
+    ui->ce_img.w = w;
+    ui->ce_img.h = h;
+    ui->ce_cw = (float)w;               /* сначала — самая большая рамка по центру */
+    ui->ce_cx = (float)w / 2;
+    ui->ce_cy = (float)h / 2;
+    ce_clamp(ui);
+}
+
+static int by_str_desc(const void *a, const void *b)
+{
+    return strcmp((const char *)b, (const char *)a);
+}
+
+static void ce_open(Ui *ui)
+{
+    char dir[1100];
+    BtDir *d;
+    const char *n;
+
+    if (!ui->lib.count)
+        return;
+    ui->ce = 1;
+    ui->ce_n = ui->ce_i = 0;
+    ui->ce_drag = 0;
+    shots_dir(&ui->lib.games[ui->sel], dir, sizeof(dir));
+    if ((d = bt_dir_open(dir)) != NULL) {
+        while ((n = bt_dir_next(d)) != NULL && ui->ce_n < 48) {
+            size_t l = strlen(n);
+            if (l > 4 && l < sizeof(ui->ce_files[0]) && !strcmp(n + l - 4, ".png"))
+                snprintf(ui->ce_files[ui->ce_n++], sizeof(ui->ce_files[0]), "%s", n);
+        }
+        bt_dir_close(d);
+    }
+    /* свежие снимки первыми, заставка «title.png» — в самом начале */
+    qsort(ui->ce_files, (size_t)ui->ce_n, sizeof(ui->ce_files[0]), by_str_desc);
+    ce_load(ui);
+}
+
+static void ce_close(Ui *ui)
+{
+    ui->ce = 0;
+    image_free(&ui->ce_img);
+}
+
+/* Где картинка скриншота и кнопки: превью сверху, ряд кнопок снизу. */
+static void ce_geom(const Ui *ui, int *px, int *py, int *pw, int *ph, int *bar_y, int *bw)
+{
+    int bh = 13 * ui->s, avail_w = ui->W - 2 * ui->m, avail_h = ui->H - bh - 3 * ui->m;
+    float k = 1;
+
+    if (ui->ce_img.px) {
+        k = fminf((float)avail_w / (float)ui->ce_img.w, (float)avail_h / (float)ui->ce_img.h);
+        if (k >= 1)
+            k = floorf(k);              /* целый масштаб — пиксели ровные */
+    }
+    *pw = ui->ce_img.px ? (int)((float)ui->ce_img.w * k) : avail_w;
+    *ph = ui->ce_img.px ? (int)((float)ui->ce_img.h * k) : avail_h;
+    *px = (ui->W - *pw) / 2;
+    *py = ui->m + (avail_h - *ph) / 2;
+    *bar_y = ui->H - bh - ui->m;
+    *bw = (ui->W - 2 * ui->m) / CE_COUNT;
+}
+
+static void draw_cover_editor(Ui *ui)
+{
+    static const Icon *const icons[CE_COUNT] = { &icon_chevron, &icon_chevron, &icon_minus, &icon_plus,
+                                                 &icon_trash, &icon_cross, &icon_check };
+    Image *s = ui->scr;
+    int px, py, pw, ph, by, bw, i;
+
+    ce_geom(ui, &px, &py, &pw, &ph, &by, &bw);
+    gfx_fill(s, 0, 0, ui->W, ui->H, 0xFF0B0A10u);
+    if (ui->ce_img.px) {
+        float k = (float)pw / (float)ui->ce_img.w, ch = ui->ce_cw / ce_aspect(ui);
+        int fx = px + (int)((ui->ce_cx - ui->ce_cw / 2) * k), fy = py + (int)((ui->ce_cy - ch / 2) * k);
+        int fw = (int)(ui->ce_cw * k), fh = (int)(ch * k);
+        gfx_blit_scaled(s, &ui->ce_img, px, py, pw, ph, 255);
+        /* всё, что не попадёт на обложку, притемнено */
+        gfx_fill(s, px, py, pw, fy - py, 0xA0000000u);
+        gfx_fill(s, px, fy + fh, pw, py + ph - fy - fh, 0xA0000000u);
+        gfx_fill(s, px, fy, fx - px, fh, 0xA0000000u);
+        gfx_fill(s, fx + fw, fy, px + pw - fx - fw, fh, 0xA0000000u);
+        gfx_frame(s, fx, fy, fw, fh, 0xFFF4F0FFu);
+        gfx_frame(s, fx - 1, fy - 1, fw + 2, fh + 2, ui->th->accent);
+        /* точки-страницы: какой это снимок из скольких */
+        for (i = 0; i < ui->ce_n && i < 24; i++)
+            gfx_fill(s, ui->W / 2 - ui->ce_n * 3 + i * 6, py + ph + 3, 3, 3,
+                     i == ui->ce_i ? 0xFFF4F0FFu : 0xFF4A4458u);
+    } else {
+        /* снимков нет: фотоаппарат — сделайте снимок в игре (F12 или кнопка с фотоаппаратом) */
+        draw_icon(s, &icon_camera, (ui->W - icon_camera.w * 3 * ui->s) / 2, py + ph / 2 - icon_camera.h * 3 * ui->s / 2,
+                  3 * ui->s, 0xFF4A4458u, 0);
+    }
+    for (i = 0; i < CE_COUNT; i++) {
+        const Icon *ic = icons[i];
+        int x = ui->m + i * bw, on = (i == CE_PREV || i == CE_NEXT) ? ui->ce_n > 1 : (i <= CE_BIGGER) ? ui->ce_img.px != NULL : 1;
+        rrect(s, x + 1, by, bw - 2, 13 * ui->s, 2, i == CE_SAVE && ui->ce_img.px ? ui->th->accent : 0xFF262233u);
+        draw_icon(s, ic, x + (bw - ic->w * ui->s) / 2, by + (13 * ui->s - ic->h * ui->s) / 2, ui->s,
+                  on ? 0xFFF4F0FFu : 0xFF4A4458u, i == CE_NEXT);
+    }
+}
+
+/* Сохранить выбранный кусок как covers/<игра>.png и перерисовать коробку. */
+static void ce_save(Ui *ui)
+{
+    Game *g = &ui->lib.games[ui->sel];
+    float ch = ui->ce_cw / ce_aspect(ui);
+    int x0 = (int)(ui->ce_cx - ui->ce_cw / 2), y0 = (int)(ui->ce_cy - ch / 2), w = (int)ui->ce_cw, h = (int)ch, y;
+    char dir[1100], path[1400];
+    uint32_t *crop;
+    uint8_t *png;
+    size_t len;
+    FILE *f;
+
+    if (!ui->ce_img.px || w < 1 || h < 1 || !(crop = malloc((size_t)w * (size_t)h * 4)))
+        return;
+    for (y = 0; y < h; y++)
+        memcpy(crop + (size_t)y * (size_t)w, ui->ce_img.px + (size_t)(y0 + y) * (size_t)ui->ce_img.w + (size_t)x0,
+               (size_t)w * 4);
+    png = png_encode(crop, w, h, &len);
+    free(crop);
+    if (!png)
+        return;
+    snprintf(dir, sizeof(dir), "%s/covers", ui->lib.dir);
+    bt_mkdirs(dir);
+    snprintf(path, sizeof(path), "%s/%s.png", dir, g->base);
+    if ((f = bt_fopen(path, "wb")) != NULL) {
+        fwrite(png, 1, len, f);
+        fclose(f);
+    }
+    free(png);
+    g->cover_ready = 0;         /* перезагрузится уже с новой обложкой */
+}
+
+static void ce_reset(Ui *ui)
+{
+    Game *g = &ui->lib.games[ui->sel];
+    char path[1400];
+
+    snprintf(path, sizeof(path), "%s/covers/%s.png", ui->lib.dir, g->base);
+    bt_remove(path);
+    g->cover_ready = 0;
+}
+
+static void ce_action(Ui *ui, int a)
+{
+    switch (a) {
+    case CE_PREV: case CE_NEXT:
+        if (ui->ce_n > 1) {
+            ui->ce_i = (ui->ce_i + (a == CE_NEXT ? 1 : ui->ce_n - 1)) % ui->ce_n;
+            ce_load(ui);
+        }
+        break;
+    case CE_SMALLER: ui->ce_cw *= 0.88f; ce_clamp(ui); break;
+    case CE_BIGGER:  ui->ce_cw *= 1.12f; ce_clamp(ui); break;
+    case CE_RESET:   ce_reset(ui); ce_close(ui); break;
+    case CE_CANCEL:  ce_close(ui); break;
+    case CE_SAVE:
+        if (ui->ce_img.px) {
+            ce_save(ui);
+            ce_close(ui);
+        }
+        break;
+    }
+}
+
+static void ce_event(Ui *ui, const Event *ev)
+{
+    int px, py, pw, ph, by, bw;
+
+    ce_geom(ui, &px, &py, &pw, &ph, &by, &bw);
+    switch (ev->type) {
+    case EV_BACK:
+        ce_close(ui);
+        break;
+    case EV_KEY_DOWN:
+        switch (ev->key) {
+        case KEY_LEFT:  ce_action(ui, CE_PREV); break;
+        case KEY_RIGHT: ce_action(ui, CE_NEXT); break;
+        case KEY_UP:    ce_action(ui, CE_BIGGER); break;
+        case KEY_DOWN:  ce_action(ui, CE_SMALLER); break;
+        case KEY_FIRE: case KEY_SOFT_LEFT: ce_action(ui, CE_SAVE); break;
+        case KEY_SOFT_RIGHT: ce_action(ui, CE_CANCEL); break;
+        default:
+            if (ev->key >= KEY_NUM0 + 1 && ev->key <= KEY_NUM0 + 9 && ui->ce_img.px) {   /* 2468 — двигать рамку */
+                int d = ev->key - KEY_NUM0;
+                ui->ce_cx += d == 4 ? -8 : d == 6 ? 8 : 0;
+                ui->ce_cy += d == 2 ? -8 : d == 8 ? 8 : 0;
+                ce_clamp(ui);
+            }
+        }
+        break;
+    case EV_POINTER_DOWN:
+        if (ev->y >= by) {
+            ce_action(ui, imin(CE_COUNT - 1, imax(0, (ev->x - ui->m) / imax(1, bw))));
+        } else if (ui->ce_img.px && ev->x >= px && ev->x < px + pw && ev->y >= py && ev->y < py + ph) {
+            float k = (float)pw / (float)ui->ce_img.w;
+            ui->ce_drag = 1;            /* тянем рамку: запоминаем, где за неё взялись */
+            ui->ce_dx = ui->ce_cx - (float)(ev->x - px) / k;
+            ui->ce_dy = ui->ce_cy - (float)(ev->y - py) / k;
+        }
+        break;
+    case EV_POINTER_MOVE:
+        if (ui->ce_drag && ui->ce_img.px) {
+            float k = (float)pw / (float)ui->ce_img.w;
+            ui->ce_cx = (float)(ev->x - px) / k + ui->ce_dx;
+            ui->ce_cy = (float)(ev->y - py) / k + ui->ce_dy;
+            ce_clamp(ui);
+        }
+        break;
+    case EV_POINTER_UP:
+        ui->ce_drag = 0;
+        break;
+    default:
+        break;
+    }
+}
+
 static void on_pointer(Ui *ui, int px, int py, uint32_t now)
 {
     int i;
@@ -1108,6 +1487,10 @@ static void on_pointer(Ui *ui, int px, int py, uint32_t now)
             return;
         }
     }
+    if (ui->tab == TAB_PLAY && ui->lib.count && px < ui->m + 14 && py < ui->m + 12) {
+        ce_open(ui);
+        return;
+    }
     if (ui->tab == TAB_PLAY) {
         int best = -1;
         if (py >= ui->title_y && px < ui->W / 4) {
@@ -1127,7 +1510,7 @@ static void on_pointer(Ui *ui, int px, int py, uint32_t now)
                 best = i;
         }
         if (best >= 0 && best == ui->sel)
-            ui->launch_t0 = now;
+            start_launch(ui, now);
         else if (best >= 0)
             select_game(ui, best);
     } else if (ui->tab == TAB_LIBRARY) {
@@ -1182,7 +1565,7 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
     settings_load(&ui);
     {   /* вид анимации запуска; BT_LAUNCH_ANIM — посмотреть другие */
         const char *e = getenv("BT_LAUNCH_ANIM");
-        ui.fx = e ? atoi(e) % FX_COUNT : FX_DRIVE;
+        ui.fx = e ? atoi(e) % FX_COUNT : FX_SHATTER;
     }
     cfg->width = 400;
     cfg->height = 240;
@@ -1213,6 +1596,10 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
         while (platform_poll(&ev)) {
             if (ev.type == EV_QUIT)
                 running = 0;
+            if (ui.ce && ev.type != EV_QUIT) {
+                ce_event(&ui, &ev);
+                continue;
+            }
             if (ui.launch_t0)
                 continue;
             if (ev.type == EV_BACK) {
@@ -1272,8 +1659,10 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
             ui.grid_scroll += (row - (float)visible_rows + 1 - ui.grid_scroll) * clampf(dt * 14.0f, 0, 1);
 
         load_covers(&ui, now);
-        if (ui.launch_t0 && ui.snap.px) {
-            launch_fx(&ui, (float)(now - ui.launch_t0) / LAUNCH_MS, now);
+        if (ui.ce) {
+            draw_cover_editor(&ui);
+        } else if (ui.launch_t0 && ui.snap.px) {
+            launch_fx(&ui, (float)(now - ui.launch_t0) / (ui.fx == FX_SHATTER ? 3300 : 1700), now);
         } else {
             uint32_t l0 = ui.launch_t0;
             ui.launch_t0 = 0;           /* снимок полки — без анимации */
@@ -1297,7 +1686,7 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
         }
         platform_present();
 
-        if (ui.launch_t0 && now - ui.launch_t0 >= LAUNCH_MS) {
+        if (ui.launch_t0 && now - ui.launch_t0 >= (uint32_t)(ui.fx == FX_SHATTER ? 3300 : 1700)) {
             image_free(&ui.snap);
             if (run_game(&ui, &ui.lib.games[ui.sel]))
                 running = 0;

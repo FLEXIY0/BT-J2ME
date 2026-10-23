@@ -36,6 +36,8 @@ int64_t snd_seek_us(int h, int64_t us);
 int64_t snd_duration_us(int h);             /* -1 — неизвестна */
 /* Manager.playTone: сыграть ноту и забыть. */
 void    snd_tone(int note, int ms, int volume);
+/* Сыграть звук один раз и забыть (звуки лаунчера). */
+void    snd_play_once(const uint8_t *data, size_t len, int volume);
 
 /* Отрисовать звуковой файл в WAV без устройства (проверки и отладка). 0 — успех. */
 int     audio_render_file(const char *in, const char *out, int kind);

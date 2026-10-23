@@ -22,4 +22,10 @@ const char *bt_home(void);
 /* %APPDATA% на Windows (настройки и сохранения), на остальных — NULL. */
 const char *bt_appdata(void);
 
+/* Папка данных bt-j2me (сохранения, скриншоты): $XDG_DATA_HOME/bt-j2me, %APPDATA%\bt-j2me
+ * или ~/.local/share/bt-j2me. */
+void        bt_data_dir(char *out, size_t cap);
+/* Создать все папки по пути. */
+void        bt_mkdirs(const char *path);
+
 #endif
