@@ -1,6 +1,7 @@
 #include "platform.h"
 #include "compat.h"
 #include "cursor.h"
+#include "multitap.h"
 #include "touch.h"
 #include "util.h"
 
@@ -45,6 +46,15 @@ static int           pc_nwide;
 static char          pc_game[128];  /* игра, что сейчас идёт (для широкого экрана) */
 static volatile int  menu_open;     /* меню паузы */
 static void menu_close(void);
+/* Ввод текста на ПК: режим букв для клавиатуры и экранная клавиатура для геймпада. */
+static int           text_wanted;   /* игра показала TextBox/поле ввода — буквы идут символами */
+static int           typing;        /* режим букв: буквы → мультитап, WASD не стрелки */
+static uint32_t      typing_t;
+static int           osk_open;
+static int  typing_key(const SDL_Event *e);
+static int  osk_event(const SDL_Event *e);
+static void osk_draw(void);
+static void hint_draw(void);
 static void menu_show(void);
 static int  menu_event(const SDL_Event *e);
 static void set_fullscreen(int on);
@@ -165,6 +175,11 @@ static void touch_emit(EventType type, int key, int x, int y)
     }
 }
 
+static void mt_emit(EventType type, int key)
+{
+    push(type, key);
+}
+
 int platform_init(const PlatformConfig *cfg)
 {
     Uint32 wflags;
@@ -221,6 +236,7 @@ int platform_init(const PlatformConfig *cfg)
     show_mouse(0);
     if (touch_on)
         touch_init(ren, touch_emit);
+    mt_set_emit(mt_emit);
     /* Уже подключённые геймпады придут событиями SDL_CONTROLLERDEVICEADDED. */
     return platform_set_screen(cfg->width, cfg->height, cfg->scale);
 }
@@ -321,6 +337,10 @@ static void render(void)
         touch_draw();
     } else {
         SDL_RenderCopy(ren, tex, NULL, &game_dst);
+        if (osk_open)
+            osk_draw();
+        else if (typing)
+            hint_draw();
         if (menu_open)
             menu_draw();
     }
@@ -441,6 +461,8 @@ void platform_text_input(int on)
 {
     if (touch_on)
         touch_text_input(on);   /* на ПК с --touch — та же клавиатура; обычный ввод с клавиатуры есть всегда */
+    text_wanted = on;
+    typing = 0;
 }
 #endif
 
@@ -516,6 +538,10 @@ static void translate(const SDL_Event *e)
 
     if (menu_open && menu_event(e))
         return;                         /* меню паузы забирает ввод себе */
+    if (!touch_on && !cursor_mode && osk_open && osk_event(e))
+        return;                         /* экранная клавиатура геймпада */
+    if (!touch_on && !cursor_mode && typing_key(e))
+        return;                         /* режим букв */
     if (!touch_on && !cursor_mode) {    /* в игре рука видна, только пока мышью пользуются */
         if (e->type == SDL_MOUSEMOTION || e->type == SDL_MOUSEBUTTONDOWN) {
             mouse_seen = SDL_GetTicks();
@@ -601,7 +627,14 @@ static void translate(const SDL_Event *e)
     }
     case SDL_CONTROLLERBUTTONDOWN:
     case SDL_CONTROLLERBUTTONUP:
-        if (e->cbutton.button == SDL_CONTROLLER_BUTTON_GUIDE) {
+        if ((e->cbutton.button == SDL_CONTROLLER_BUTTON_LEFTSTICK ||
+             e->cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSTICK) && !touch_on && !cursor_mode) {
+            if (e->type == SDL_CONTROLLERBUTTONDOWN) {
+                osk_open = 1;           /* нажатие на стик — экранная клавиатура */
+                if (tex)
+                    render();
+            }
+        } else if (e->cbutton.button == SDL_CONTROLLER_BUTTON_GUIDE) {
             if (e->type == SDL_CONTROLLERBUTTONDOWN) {
                 if (!touch_on && !cursor_mode)
                     menu_show();
@@ -663,15 +696,20 @@ int platform_poll(Event *ev)
     if (mouse_shown && !cursor_mode && !menu_open && SDL_GetTicks() - mouse_seen > 2500 &&
         !(SDL_GetMouseState(NULL, NULL) & SDL_BUTTON_LMASK))
         show_mouse(0);
+    mt_tick(SDL_GetTicks());
+    if (typing && !osk_open && SDL_GetTicks() - typing_t > 8000) {
+        typing = 0;                 /* давно не печатали — клавиши снова управление */
+        if (tex)
+            render();
+    }
     if (touch_on) {
-        touch_tick(SDL_GetTicks());
         if (touch_take_restart())
             push(EV_RESTART, 0);
         if (touch_take_shot())
             push(EV_SCREENSHOT, 0);
     }
     if (((touch_on && touch_dirty()) || (fade_ms > 0 && fade_t0)) && tex)
-        render();       /* кнопка нажалась, стик сдвинулся или игра проявляется, а кадр игра не прислала */       /* кнопка нажалась или стик сдвинулся, а игра кадр не прислала */
+        render();       /* кнопка нажалась, стик сдвинулся или игра проявляется, а кадр игра не прислала */
     if (!q_len)
         return 0;
     *ev = queue[q_head];
@@ -1084,4 +1122,371 @@ static int menu_event(const SDL_Event *e)
 int platform_paused(void)
 {
     return menu_open;
+}
+
+/* ---------- ввод текста на ПК ---------- */
+
+/* Буква в игру: в поле ввода (TextBox) — символом, в самодельном поле на Canvas — мультитапом. */
+static void type_char(int c)
+{
+    if (text_wanted) {
+        push(EV_CHAR, 0);
+        queue[(q_head + q_len - 1) % QUEUE_LEN].ch = c;
+    } else if (c == ' ') {
+        mt_key('0');
+    } else if (c >= '0' && c <= '9') {
+        mt_key(c);
+    } else {
+        mt_letter(c);
+    }
+}
+
+static void type_backspace(void)
+{
+    if (text_wanted) {
+        push(EV_KEY_DOWN, KEY_CLEAR);
+        push(EV_KEY_UP, KEY_CLEAR);
+    } else {
+        mt_key(KEY_CLEAR);
+    }
+}
+
+static int utf8_decode(const char **p)
+{
+    const unsigned char *u = (const unsigned char *)*p;
+    int c = u[0], n = 1;
+
+    if ((c & 0xE0) == 0xC0 && u[1]) {
+        c = ((c & 0x1F) << 6) | (u[1] & 0x3F);
+        n = 2;
+    } else if ((c & 0xF0) == 0xE0 && u[1] && u[2]) {
+        c = ((c & 0x0F) << 12) | ((u[1] & 0x3F) << 6) | (u[2] & 0x3F);
+        n = 3;
+    }
+    *p += n;
+    return c;
+}
+
+static void set_typing(int on)
+{
+    typing = on;
+    typing_t = SDL_GetTicks();
+    if (tex)
+        render();
+}
+
+/* Клавиатура ПК в игре. Буквы, кроме WASD/QE, сами включают режим букв (Tab — вручную):
+ * тогда все буквы, кириллица, пробел и цифры уходят мультитапом, а Enter, стрелки,
+ * Esc и Tab режим выключают. Вне режима всё как раньше. 1 — событие съедено. */
+static int typing_key(const SDL_Event *e)
+{
+    SDL_Keycode k;
+
+    if (e->type == SDL_TEXTINPUT) {
+        const char *p = e->text.text;
+        if (text_wanted)
+            return 0;               /* TextBox: символы идут как есть */
+        if (!typing) {
+            /* кириллица на русской раскладке — точно набирают текст */
+            const unsigned char *u = (const unsigned char *)p;
+            if (u[0] < 0x80)
+                return 1;
+            set_typing(1);
+        }
+        while (*p)
+            type_char(utf8_decode(&p));
+        typing_t = SDL_GetTicks();
+        return 1;
+    }
+    if (e->type != SDL_KEYDOWN && e->type != SDL_KEYUP)
+        return 0;
+    if (text_wanted)
+        return 0;
+    k = e->key.keysym.sym;
+    if (k == SDLK_TAB) {
+        if (e->type == SDL_KEYDOWN && !e->key.repeat)
+            set_typing(!typing);
+        return 1;
+    }
+    if (!typing) {
+        if (e->type == SDL_KEYDOWN && k >= SDLK_a && k <= SDLK_z && k != SDLK_w && k != SDLK_a &&
+            k != SDLK_s && k != SDLK_d && k != SDLK_q && k != SDLK_e && !(e->key.keysym.mod & (KMOD_CTRL | KMOD_ALT))) {
+            set_typing(1);          /* сама буква придёт следом через SDL_TEXTINPUT */
+            return 1;
+        }
+        return 0;
+    }
+    if (e->type == SDL_KEYUP)
+        return 0;                   /* отпускания — в игру: вдруг клавишу зажали до режима букв */
+    switch (k) {
+    case SDLK_RETURN: case SDLK_KP_ENTER: case SDLK_UP: case SDLK_DOWN: case SDLK_LEFT: case SDLK_RIGHT:
+        if (e->key.keysym.mod & KMOD_ALT)
+            return 0;
+        if (e->type == SDL_KEYDOWN)
+            set_typing(0);
+        return 0;                   /* и само нажатие — в игру (Enter — подтвердить) */
+    case SDLK_ESCAPE:
+        if (e->type == SDL_KEYDOWN)
+            set_typing(0);
+        return 1;
+    case SDLK_BACKSPACE: case SDLK_DELETE:
+        if (e->type == SDL_KEYDOWN)
+            type_backspace();
+        typing_t = SDL_GetTicks();
+        return 1;
+    case SDLK_F1: case SDLK_F2: case SDLK_F10: case SDLK_F11: case SDLK_F12:
+        return 0;
+    default:
+        return 1;                   /* буквы, цифры, пробел — придут символами */
+    }
+}
+
+/* Экранная клавиатура для геймпада: крестовина/стик — выбор, A — ввести, B — стереть,
+ * X — пробел, Y — заглавные, LB/RB — русские/латинские, Start или нажатие на стик — готово. */
+#define OSK_COLS  11
+#define OSK_CELL  16
+#define OSK_W     (OSK_COLS * OSK_CELL + 8)
+#define OSK_H     (5 * OSK_CELL + 8)
+
+static const char *const osk_rows[2][4] = {
+    { "1234567890-", "йцукенгшщзх", "фывапролджэ", "ячсмитьбю.," },
+    { "1234567890-", "qwertyuiop'", "asdfghjkl:!", "zxcvbnm.,?@" }
+};
+enum { OSK_SHIFT, OSK_LANG, OSK_SPACE, OSK_BACK, OSK_DONE, OSK_SPECIALS };
+static const int osk_special_x[OSK_SPECIALS + 1] = { 0, 1, 3, 7, 8, 11 };   /* границы кнопок нижнего ряда */
+
+static int          osk_r, osk_c, osk_lang, osk_shift, osk_stick_x, osk_stick_y;
+static Image        osk_img;
+static SDL_Texture *osk_tex;
+static SDL_Rect     osk_dst;
+static int          osk_k;
+
+static int osk_char(int r, int c)
+{
+    const char *p = osk_rows[osk_lang][r];
+    int i, ch = 0;
+
+    for (i = 0; i <= c && *p; i++)
+        ch = utf8_decode(&p);
+    if (osk_shift) {
+        if ((ch >= 'a' && ch <= 'z') || (ch >= 0x430 && ch <= 0x44F))
+            ch -= 32;
+        else if (ch == 0x451)
+            ch = 0x401;
+    }
+    return ch;
+}
+
+static int osk_special_at(int c)
+{
+    int i;
+
+    for (i = 0; i < OSK_SPECIALS; i++)
+        if (c < osk_special_x[i + 1])
+            return i;
+    return OSK_DONE;
+}
+
+static void osk_press(void)
+{
+    if (osk_r < 4) {
+        type_char(osk_char(osk_r, osk_c));
+        if (osk_shift == 1)
+            osk_shift = 0;
+        return;
+    }
+    switch (osk_special_at(osk_c)) {
+    case OSK_SHIFT: osk_shift = !osk_shift; break;
+    case OSK_LANG:  osk_lang = !osk_lang; break;
+    case OSK_SPACE: type_char(' '); break;
+    case OSK_BACK:  type_backspace(); break;
+    default:        osk_open = 0; break;
+    }
+}
+
+static void osk_move(int dr, int dc)
+{
+    if (dr) {
+        osk_r = (osk_r + dr + 5) % 5;
+        if (osk_r == 4)             /* в нижнем ряду — на кнопку под курсором */
+            osk_c = osk_special_x[osk_special_at(osk_c)];
+    }
+    if (dc) {
+        if (osk_r == 4) {
+            int s = (osk_special_at(osk_c) + dc + OSK_SPECIALS) % OSK_SPECIALS;
+            osk_c = osk_special_x[s];
+        } else {
+            osk_c = (osk_c + dc + OSK_COLS) % OSK_COLS;
+        }
+    }
+}
+
+static void osk_draw(void)
+{
+    static const char *const names[OSK_SPECIALS] = { "Аа", "RU", "пробел", "<-", "готово" };
+    Image *m = &osk_img;
+    int dw, dh, r, c, i;
+    char buf[8];
+
+    if (!osk_img.px && !(osk_img = image_new(OSK_W, OSK_H)).px)
+        return;
+    if (!osk_tex) {
+        osk_tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, OSK_W, OSK_H);
+        if (!osk_tex)
+            return;
+        SDL_SetTextureBlendMode(osk_tex, SDL_BLENDMODE_BLEND);
+    }
+    gfx_fill(m, 0, 0, OSK_W, OSK_H, 0xEE1A1724u);
+    gfx_frame(m, 0, 0, OSK_W, OSK_H, 0xFF3A3450u);
+    for (r = 0; r < 4; r++)
+        for (c = 0; c < OSK_COLS; c++) {
+            int ch = osk_char(r, c), x = 4 + c * OSK_CELL, y = 4 + r * OSK_CELL, n = 0;
+            int sel = r == osk_r && c == osk_c;
+            if (sel)
+                gfx_fill(m, x, y, OSK_CELL - 1, OSK_CELL - 1, 0xFF9C8FF0u);
+            if (ch < 0x80)
+                buf[n++] = (char)ch;
+            else {
+                buf[n++] = (char)(0xC0 | (ch >> 6));
+                buf[n++] = (char)(0x80 | (ch & 0x3F));
+            }
+            buf[n] = '\0';
+            gfx_text(m, &font_mid, x + (OSK_CELL - 1 - gfx_text_width(&font_mid, buf, 1)) / 2, y,
+                     buf, sel ? 0xFF14111Cu : 0xFFEDE8F2u, 1);
+        }
+    for (i = 0; i < OSK_SPECIALS; i++) {
+        int x = 4 + osk_special_x[i] * OSK_CELL, w = (osk_special_x[i + 1] - osk_special_x[i]) * OSK_CELL - 1;
+        int y = 4 + 4 * OSK_CELL, sel = osk_r == 4 && osk_special_at(osk_c) == i;
+        const char *t = i == OSK_LANG ? (osk_lang ? "EN" : "RU") : names[i];
+        gfx_fill(m, x, y, w, OSK_CELL - 1, sel ? 0xFF9C8FF0u : (i == OSK_SHIFT && osk_shift) ? 0xFF4A4266u : 0xFF2E2944u);
+        gfx_text(m, &font_small, x + (w - gfx_text_width(&font_small, t, 1)) / 2, y + 2, t,
+                 sel ? 0xFF14111Cu : 0xFFEDE8F2u, 1);
+    }
+    SDL_UpdateTexture(osk_tex, NULL, osk_img.px, OSK_W * 4);
+    platform_display_size(&dw, &dh);
+    osk_k = dw * 9 / 10 / OSK_W < dh * 45 / 100 / OSK_H ? dw * 9 / 10 / OSK_W : dh * 45 / 100 / OSK_H;
+    if (osk_k < 1)
+        osk_k = 1;
+    osk_dst.w = OSK_W * osk_k;
+    osk_dst.h = OSK_H * osk_k;
+    osk_dst.x = (dw - osk_dst.w) / 2;
+    osk_dst.y = dh - osk_dst.h - dh / 40;
+    SDL_RenderCopy(ren, osk_tex, NULL, &osk_dst);
+}
+
+/* Подсказка режима букв сверху экрана. */
+static void hint_draw(void)
+{
+    static Image img;
+    static SDL_Texture *t;
+    static const char *msg = "Ввод букв · Enter — готово, Tab — выключить";
+    int w = gfx_text_width(&font_small, msg, 1) + 12, h = font_small.h + 6, dw, dh, k;
+    SDL_Rect d;
+
+    if (!img.px) {
+        img = image_new(w, h);
+        if (!img.px)
+            return;
+        gfx_fill(&img, 0, 0, w, h, 0xE01A1724u);
+        gfx_text(&img, &font_small, 6, 3, msg, 0xFFEDE8F2u, 1);
+        t = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, w, h);
+        if (t) {
+            SDL_SetTextureBlendMode(t, SDL_BLENDMODE_BLEND);
+            SDL_UpdateTexture(t, NULL, img.px, w * 4);
+        }
+    }
+    if (!t)
+        return;
+    platform_display_size(&dw, &dh);
+    k = dw / 2 / w > 0 ? dw / 2 / w : 1;
+    if (k > 3)
+        k = 3;
+    d.w = w * k;
+    d.h = h * k;
+    d.x = (dw - d.w) / 2;
+    d.y = dh / 60;
+    SDL_RenderCopy(ren, t, NULL, &d);
+}
+
+static int osk_hit(int wx, int wy, int *r, int *c)
+{
+    int ww, wh, dw, dh, x, y;
+
+    SDL_GetWindowSize(win, &ww, &wh);
+    platform_display_size(&dw, &dh);
+    if (ww > 0 && wh > 0) {
+        wx = wx * dw / ww;
+        wy = wy * dh / wh;
+    }
+    if (osk_k < 1)
+        return 0;
+    x = (wx - osk_dst.x) / osk_k - 4;
+    y = (wy - osk_dst.y) / osk_k - 4;
+    if (x < 0 || y < 0 || x >= OSK_COLS * OSK_CELL || y >= 5 * OSK_CELL)
+        return 0;
+    *r = y / OSK_CELL;
+    *c = x / OSK_CELL;
+    return 1;
+}
+
+static int osk_event(const SDL_Event *e)
+{
+    int r, c, d;
+
+    switch (e->type) {
+    case SDL_CONTROLLERBUTTONDOWN:
+        switch (e->cbutton.button) {
+        case SDL_CONTROLLER_BUTTON_DPAD_UP: osk_move(-1, 0); break;
+        case SDL_CONTROLLER_BUTTON_DPAD_DOWN: osk_move(1, 0); break;
+        case SDL_CONTROLLER_BUTTON_DPAD_LEFT: osk_move(0, -1); break;
+        case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: osk_move(0, 1); break;
+        case SDL_CONTROLLER_BUTTON_A: osk_press(); break;
+        case SDL_CONTROLLER_BUTTON_B: type_backspace(); break;
+        case SDL_CONTROLLER_BUTTON_X: type_char(' '); break;
+        case SDL_CONTROLLER_BUTTON_Y: osk_shift = !osk_shift; break;
+        case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:
+            osk_lang = !osk_lang;
+            break;
+        case SDL_CONTROLLER_BUTTON_START: case SDL_CONTROLLER_BUTTON_LEFTSTICK:
+        case SDL_CONTROLLER_BUTTON_RIGHTSTICK: case SDL_CONTROLLER_BUTTON_BACK:
+            osk_open = 0;
+            break;
+        case SDL_CONTROLLER_BUTTON_GUIDE:
+            osk_open = 0;
+            return 0;               /* и меню паузы — как обычно */
+        }
+        if (tex)
+            render();
+        return 1;
+    case SDL_CONTROLLERBUTTONUP:
+        return 1;
+    case SDL_CONTROLLERAXISMOTION:
+        d = e->caxis.value < -STICK_PRESS ? -1 : e->caxis.value > STICK_PRESS ? 1 : 0;
+        if (e->caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) {
+            if (d && d != osk_stick_x)
+                osk_move(0, d);
+            osk_stick_x = d;
+        } else if (e->caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) {
+            if (d && d != osk_stick_y)
+                osk_move(d, 0);
+            osk_stick_y = d;
+        } else {
+            return 1;
+        }
+        if (tex)
+            render();
+        return 1;
+    case SDL_MOUSEBUTTONDOWN:
+        if (e->button.button == SDL_BUTTON_LEFT && osk_hit(e->button.x, e->button.y, &r, &c)) {
+            osk_r = r;
+            osk_c = c;
+            osk_press();
+            if (tex)
+                render();
+            return 1;
+        }
+        return 0;
+    default:
+        return 0;                   /* клавиатура ПК работает и при открытой экранной */
+    }
 }

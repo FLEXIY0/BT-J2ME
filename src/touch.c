@@ -1,5 +1,6 @@
 /* Сенсорное управление: кнопки поверх игры, плавающий стик и редактор раскладки. */
 #include "touch.h"
+#include "multitap.h"
 #include "compat.h"
 #include "gfx.h"
 #include "util.h"
@@ -67,9 +68,6 @@ static struct {
     int           keycount[KEY_SLOTS];
     int           panel, last_panel, ptr_down;   /* открытая панель: цифры или клавиатура */
     int           kb_en, kb_shift, text_mode, kb_auto, kb_down;
-    struct { int key, taps; } mt[64];                /* очередь мультитапа: буквы → нажатия цифр */
-    int           mt_head, mt_len, mt_phase, mt_done, mt_last_key;
-    uint32_t      mt_next, mt_last_end;
     int           stick_on;
     float         sox, soy, skx, sky;
     int           sdir[4];
@@ -584,10 +582,6 @@ static const int pad_keys[12] = { '1', '2', '3', '4', '5', '6', '7', '8', '9', K
 static const char *const kb_ru[3] = { "йцукенгшщзх", "фывапролджэ", "ячсмитьбю" };
 static const char *const kb_en[3] = { "qwertyuiop", "asdfghjkl", "zxcvbnm" };
 
-/* Мультитап как на кнопочных телефонах (E.161 и русская раскладка Nokia). */
-static const char *const mt_en[10] = { " ", ".,?!1", "abc", "def", "ghi", "jkl", "mno", "pqrs", "tuv", "wxyz" };
-static const char *const mt_ru[10] = { " ", ".,?!1", "абвг", "деёжз", "ийкл", "мноп", "рсту", "фхцч", "шщъы", "ьэюя" };
-
 static int utf8_next(const char **p)
 {
     const unsigned char *u = (const unsigned char *)*p;
@@ -602,13 +596,6 @@ static int utf8_next(const char **p)
     }
     *p += n;
     return c;
-}
-
-static int lower(int c)
-{
-    if ((c >= 'A' && c <= 'Z') || (c >= 0x410 && c <= 0x42F))
-        return c + 32;
-    return c == 0x401 ? 0x451 : c;
 }
 
 static int upper(int c)
@@ -727,76 +714,6 @@ static int panel_items(PItem *it)
     return n;
 }
 
-/* ---------- мультитап: буква → несколько нажатий цифры ---------- */
-
-static void mt_push(int key, int taps)
-{
-    if (T.mt_len == (int)(sizeof(T.mt) / sizeof(T.mt[0])))
-        return;
-    T.mt[(T.mt_head + T.mt_len) % 64].key = key;
-    T.mt[(T.mt_head + T.mt_len) % 64].taps = taps;
-    T.mt_len++;
-}
-
-static void mt_letter(int c)
-{
-    int d, k;
-
-    c = lower(c);
-    for (d = 0; d < 10; d++) {
-        const char *tabs[2] = { mt_en[d], mt_ru[d] };
-        for (k = 0; k < 2; k++) {
-            const char *p = tabs[k];
-            int i = 1;
-            while (*p) {
-                if (utf8_next(&p) == c) {
-                    mt_push('0' + d, i);
-                    return;
-                }
-                i++;
-            }
-        }
-    }
-}
-
-static void emit_raw(EventType type, int key)
-{
-    T.emit(type, key, 0, 0);
-}
-
-/* Зовётся из platform_poll: нажатия очереди мультитапа по времени. */
-void touch_tick(uint32_t now)
-{
-    int key;
-
-    if (!T.mt_len || (int32_t)(now - T.mt_next) < 0)
-        return;
-    key = T.mt[T.mt_head].key;
-    if (T.mt_phase) {
-        emit_raw(EV_KEY_UP, key);
-        T.mt_phase = 0;
-        if (++T.mt_done >= T.mt[T.mt_head].taps) {
-            T.mt_head = (T.mt_head + 1) % 64;
-            T.mt_len--;
-            T.mt_done = 0;
-            T.mt_last_key = key;
-            T.mt_last_end = now;
-            T.mt_next = now + 250;      /* следующая буква на другой цифре */
-            return;
-        }
-        T.mt_next = now + 160;          /* пауза между нажатиями одной буквы */
-        return;
-    }
-    /* та же цифра у следующей буквы — ждём, пока телефон «примет» прошлую */
-    if (T.mt_done == 0 && key == T.mt_last_key && now - T.mt_last_end < 1500) {
-        T.mt_next = T.mt_last_end + 1500;
-        return;
-    }
-    emit_raw(EV_KEY_DOWN, key);
-    T.mt_phase = 1;
-    T.mt_next = now + 150;              /* игры опрашивают клавиши раз в кадр — держим подольше */
-}
-
 static void kb_action(const PItem *p)
 {
     switch (p->kind) {
@@ -812,13 +729,13 @@ static void kb_action(const PItem *p)
         if (T.text_mode)
             T.emit(EV_CHAR, ' ', 0, 0);
         else
-            mt_push('0', 1);
+            mt_key('0');
         break;
     case PI_BKSP:   /* через очередь: нажатие держится, как пальцем, — мгновенное игры не замечают */
-        mt_push(KEY_CLEAR, 1);
+        mt_key(KEY_CLEAR);
         break;
     case PI_ENTER:
-        mt_push(KEY_FIRE, 1);
+        mt_key(KEY_FIRE);
         break;
     case PI_SHIFT:  T.kb_shift = !T.kb_shift; break;
     case PI_LANG:   T.kb_en = !T.kb_en; break;
@@ -1467,8 +1384,7 @@ void touch_profile(const char *game_id)
     T.panel = P_NONE;
     T.kb_auto = 0;
     T.kb_down = -1;
-    T.mt_len = 0;
-    T.mt_phase = 0;
+    mt_clear();
     T.sel = -1;
     T.game = game_id != NULL;
     if (T.game) {
