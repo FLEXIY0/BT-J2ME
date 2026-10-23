@@ -5,6 +5,16 @@
 #include <SDL.h>
 #include <stdio.h>
 
+#if !SDL_VERSION_ATLEAST(2, 24, 0)
+/* виртуальный геймпад (SDL_JoystickAttachVirtualEx) появился в SDL 2.24 */
+int main(void)
+{
+    printf("skip pad: SDL %d.%d.%d старее 2.24 — виртуального геймпада нет\n", SDL_MAJOR_VERSION, SDL_MINOR_VERSION,
+           SDL_PATCHLEVEL);
+    return 0;
+}
+#else
+
 static int fails;
 
 static void expect(const char *what, EventType type, int key)
@@ -126,3 +136,4 @@ int main(void)
     printf(fails ? "провалено: %d\n" : "геймпад: все проверки прошли\n", fails);
     return fails ? 1 : 0;
 }
+#endif
