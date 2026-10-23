@@ -116,6 +116,9 @@ int platform_init(const PlatformConfig *cfg)
     touch_on = cfg->touch;
 #ifdef __ANDROID__
     touch_on = 1;
+    /* окно «растягиваемое»: иначе SDL намертво закрепляет ориентацию, в которой создано окно,
+     * и экран не поворачивается; так — поворот по датчику с учётом блокировки поворота */
+    wflags |= SDL_WINDOW_RESIZABLE;
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");   /* «назад» — в игру, а не закрыть приложение */
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "Portrait PortraitUpsideDown LandscapeLeft LandscapeRight");
 #endif

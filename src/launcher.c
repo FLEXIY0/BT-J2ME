@@ -16,7 +16,7 @@
 
 #define REPEAT_DELAY 330
 #define REPEAT_RATE  110
-#define LAUNCH_MS    1600
+#define LAUNCH_MS    1700
 #define KEEP_COVERS  24     /* обложки дальше этого от выбранной выгружаем — память важнее */
 #define BOX_ASPECT   0.72f  /* коробка как у игр для приставок: ширина / высота */
 #define SIDE_SCALE   0.84f
@@ -59,6 +59,8 @@ typedef struct {
     float        pos, grid_scroll;
     int          held, held_since, last_repeat;
     int          pad_connected;
+    Image        snap;          /* кадр полки в момент запуска — из него строится анимация */
+    int          fx;            /* вид анимации запуска */
     int          ptr_down, ptr_x0, ptr_y0, ptr_x, ptr_y;   /* касание: тап или свайп решаем при отпускании */
     uint32_t     pad_flash;
     uint32_t     launch_t0;
@@ -495,59 +497,10 @@ static void draw_counter(Ui *ui, int cur, int total)
 
 static void draw_add_tile(Ui *ui, int x, int y, int w, int h);
 
-static float ease_out(float t) { t = clampf(t, 0, 1); return 1 - (1 - t) * (1 - t); }
-
-/* Анимация запуска выбранной коробки (вариант — BT_LAUNCH_ANIM, пока выбираем лучший):
- * 0 — диск выезжает вбок, 1 — диск поднимается из коробки, 2 — коробка раскрывается,
- * 3 — коробка наезжает на камеру. Возвращает 1, если коробку уже нарисовала сама. */
-static int launch_anim(Ui *ui, int x, int y, int w, int h, float launch, uint32_t now)
-{
-    static int style = -1;
-    Image *s = ui->scr;
-    Game *g = &ui->lib.games[ui->sel];
-    float out = ease_out(launch / 0.3f), spin = (float)(now - ui->launch_t0) / 1000.0f * (0.5f + launch * 4);
-    int r = w * 46 / 100;
-
-    if (style < 0) {
-        const char *e = getenv("BT_LAUNCH_ANIM");
-        style = e ? atoi(e) : 0;
-    }
-    switch (style) {
-    case 1: {   /* диск поднимается над коробкой и крутится */
-        float up = ease_out(launch / 0.35f);
-        gfx_disc(s, x + w / 2, y + h / 2 - (int)(up * (float)h * 0.62f), r, spin, 255);
-        draw_box(ui, x, y, w, h, g, 0, 0, now);
-        return 1;
-    }
-    case 2: {   /* крышка коробки распахивается влево, диск крутится внутри */
-        int cw = (int)((float)w * (1 - out * 0.88f));
-        rrect(s, x, y, w, h, 2, ui->th->rim);
-        rrect(s, x + 2, y + 2, w - 4, h - 4, 2, ui->th->rim_hi);
-        gfx_disc(s, x + w / 2 + (int)(out * (float)w * 0.06f), y + h / 2, r, spin, 255);
-        if (cw > 2)
-            draw_box(ui, x, y, cw, h, g, 0, 0, now);
-        return 1;
-    }
-    case 3: {   /* коробка едет на камеру */
-        float k = 1 + ease_out(launch / 0.5f) * 0.55f;
-        int nw = (int)((float)w * k), nh = (int)((float)h * k);
-        draw_box(ui, x + (w - nw) / 2, y + (h - nh) / 2, nw, nh, g, 0, 0, now);
-        return 1;
-    }
-    default: {  /* диск выезжает вбок (как было) */
-        int shift = (int)(out * (float)w * 0.2f);
-        gfx_disc(s, x - shift + w / 2 + (int)(out * (float)w * 0.6f), y + h / 2, r, spin, 255);
-        draw_box(ui, x - shift, y, w, h, g, 0, 0, now);
-        return 1;
-    }
-    }
-}
-
 static void draw_play(Ui *ui, uint32_t now)
 {
     Image *s = ui->scr;
     int order, i, n = ui->lib.count;
-    float launch = ui->launch_t0 ? (float)(now - ui->launch_t0) / LAUNCH_MS : 0;
 
     if (!n && platform_can_import()) {   /* пустая полка на телефоне — сразу «+» */
         draw_add_tile(ui, (ui->W - ui->box_w) / 2, ui->box_top, ui->box_w, ui->box_h);
@@ -572,8 +525,6 @@ static void draw_play(Ui *ui, uint32_t now)
                 continue;
             box_rect(ui, i, &x, &y, &w, &h, &tilt);
             if (x > ui->W || x + w < 0)
-                continue;
-            if (i == ui->sel && ui->launch_t0 && launch_anim(ui, x, y, w, h, launch, now))
                 continue;
             if (i == ui->sel && !ui->launch_t0)
                 y += (int)(1.5f * sinf((float)now / 650.0f));   /* коробка чуть «дышит» */
@@ -730,6 +681,232 @@ static void draw_tabs(Ui *ui)
     if (ui->pad_connected && (ui->pad_flash == 0 || (platform_ticks_ms() / 200) % 2 == 0 ||
                               platform_ticks_ms() > ui->pad_flash))
         draw_icon(s, &icon_pad, ui->m, ui->m - 1, 1, ui->th->sub, 0);
+}
+
+/* ---------- анимации запуска ---------- */
+
+enum { FX_CRT, FX_WARP, FX_DRIVE, FX_SHATTER, FX_COUNT };
+
+static uint32_t fx_seed;
+static unsigned fx_rand(void)
+{
+    fx_seed = fx_seed * 1103515245u + 12345u;
+    return (fx_seed >> 16) & 0x7FFF;
+}
+
+static float fx_frand(void) { return (float)fx_rand() / 32767.0f; }
+
+static void px_blend(Image *d, int x, int y, uint32_t c, unsigned a)
+{
+    if (x < 0 || y < 0 || x >= d->w || y >= d->h || !a)
+        return;
+    d->px[y * d->w + x] = gfx_mix(d->px[y * d->w + x], c, a > 255 ? 255 : a);
+}
+
+static void fx_line(Image *d, float x0, float y0, float x1, float y1, uint32_t c, unsigned a)
+{
+    float dx = x1 - x0, dy = y1 - y0, n = fmaxf(fabsf(dx), fabsf(dy)), i;
+
+    if (n < 1)
+        n = 1;
+    for (i = 0; i <= n; i++)    /* к хвосту штрих гаснет */
+        px_blend(d, (int)(x0 + dx * i / n), (int)(y0 + dy * i / n), c, (unsigned)((float)a * (0.25f + 0.75f * i / n)));
+}
+
+static float smooth(float t) { t = clampf(t, 0, 1); return t * t * (3 - 2 * t); }
+
+/* Кусок кадра src (sx,sy,sw,sh) растянуть в dst (dx,dy,dw,dh) ближайшим соседом. */
+static void fx_stretch(Image *dst, const Image *src, float sx, float sy, float sw, float sh,
+                       int dx, int dy, int dw, int dh)
+{
+    int x, y;
+
+    for (y = 0; y < dh; y++) {
+        int py = dy + y, ty = (int)(sy + (float)y * sh / (float)dh);
+        if (py < 0 || py >= dst->h || ty < 0 || ty >= src->h)
+            continue;
+        for (x = 0; x < dw; x++) {
+            int px = dx + x, tx = (int)(sx + (float)x * sw / (float)dw);
+            if (px >= 0 && px < dst->w && tx >= 0 && tx < src->w)
+                dst->px[py * dst->w + px] = src->px[ty * src->w + tx];
+        }
+    }
+}
+
+/* Мозаика: блоки b×b заливаются средним цветом. */
+static void fx_mosaic(Image *d, int b)
+{
+    int bx, by, x, y;
+
+    if (b < 2)
+        return;
+    for (by = 0; by < d->h; by += b)
+        for (bx = 0; bx < d->w; bx += b) {
+            unsigned r = 0, g = 0, bl = 0, n = 0;
+            for (y = by; y < by + b && y < d->h; y++)
+                for (x = bx; x < bx + b && x < d->w; x++, n++) {
+                    uint32_t c = d->px[y * d->w + x];
+                    r += (c >> 16) & 255;
+                    g += (c >> 8) & 255;
+                    bl += c & 255;
+                }
+            gfx_fill(d, bx, by, b, b, 0xFF000000u | ((r / n) << 16) | ((g / n) << 8) | (bl / n));
+        }
+}
+
+static void fx_flash(Image *d, float a)
+{
+    if (a > 0)
+        gfx_fill(d, 0, 0, d->w, d->h, ((uint32_t)(clampf(a, 0, 1) * 255) << 24) | 0xFFFFFF);
+}
+
+/* Весь экран анимации запуска; t — 0..1. */
+static void launch_fx(Ui *ui, float t, uint32_t now)
+{
+    Image *s = ui->scr, *src = &ui->snap;
+    int bx, by, bw, bh;
+    float tilt, cx, cy;
+
+    box_rect(ui, ui->sel, &bx, &by, &bw, &bh, &tilt);
+    cx = (float)bx + (float)bw / 2;
+    cy = (float)by + (float)bh / 2;
+    switch (ui->fx) {
+    case FX_CRT: {
+        /* коробка наезжает на весь экран → мозаика → кинескоп схлопывается в полоску и точку */
+        float z = smooth(t / 0.35f);
+        float sx = (float)bx * (1 - z), sy = (float)by * (1 - z);
+        float sw = (float)bw + ((float)ui->W - (float)bw) * z * 0, sh;
+        int lineh, linew, y;
+        Image frame = image_new(ui->W, ui->H);
+        if (!frame.px)
+            break;
+        /* видимое окно источника сужается к коробке, сохраняя пропорции экрана */
+        sw = (float)ui->W + ((float)bw * 0.9f - (float)ui->W) * z;
+        sh = sw * (float)ui->H / (float)ui->W;
+        sx = (float)ui->W / 2 + (cx - (float)ui->W / 2) * z - sw / 2;
+        sy = (float)ui->H / 2 + (cy - (float)ui->H / 2) * z - sh / 2;
+        fx_stretch(&frame, src, sx, sy, sw, sh, 0, 0, ui->W, ui->H);
+        if (t > 0.3f)
+            fx_mosaic(&frame, 1 + (int)(smooth((t - 0.3f) / 0.25f) * 9));
+        gfx_fill(s, 0, 0, ui->W, ui->H, 0xFF000000u);
+        if (t < 0.55f) {
+            gfx_blit(s, &frame, 0, 0, 255);
+        } else {
+            /* схлопывание по вертикали, потом по горизонтали; полоска светится */
+            float v = smooth((t - 0.55f) / 0.2f), h2 = smooth((t - 0.75f) / 0.15f);
+            lineh = imax(1, (int)((float)ui->H * (1 - v)));
+            linew = imax(1, (int)((float)ui->W * (1 - h2)));
+            fx_stretch(s, &frame, (float)(ui->W - linew) / 2, 0, (float)linew, (float)ui->H,
+                       (ui->W - linew) / 2, (ui->H - lineh) / 2, linew, lineh);
+            for (y = (ui->H - lineh) / 2; y < (ui->H + lineh) / 2; y++)
+                gfx_fill(s, (ui->W - linew) / 2, y, linew, 1, ((uint32_t)(v * 230) << 24) | 0xF4F0FF);
+            if (t > 0.88f) {            /* последняя точка гаснет */
+                int r = imax(1, (int)(3 * (1 - smooth((t - 0.88f) / 0.12f))));
+                gfx_fill(s, 0, 0, ui->W, ui->H, 0xFF000000u);
+                gfx_fill(s, ui->W / 2 - r, ui->H / 2 - r, r * 2, r * 2, 0xFFF4F0FFu);
+            }
+        }
+        image_free(&frame);
+        break;
+    }
+    case FX_WARP: {
+        /* гиперпрыжок: звёзды-штрихи из коробки, коробка улетает в точку, вспышка */
+        float k = smooth(t / 0.7f), dark = smooth(t / 0.4f), scx = cx + ((float)ui->W / 2 - cx) * k;
+        float scy = cy + ((float)ui->H / 2 - cy) * k, len = (float)(ui->W + ui->H);
+        int i, n = 220;
+        gfx_blit(s, src, 0, 0, 255);
+        gfx_fill(s, 0, 0, ui->W, ui->H, ((uint32_t)(dark * 245) << 24) | 0x07060C);
+        fx_seed = 77;
+        for (i = 0; i < n; i++) {
+            float a = fx_frand() * 6.2832f, d0 = fx_frand(), sp = 0.4f + fx_frand();
+            float d = fmodf(d0 + t * t * 2.2f * sp, 1.0f), d2 = d * d * len, tail = d2 * (0.12f + 0.5f * k);
+            unsigned al = (unsigned)(255 * clampf(d * 3, 0, 1) * clampf(t * 4, 0, 1));
+            uint32_t c = i % 7 == 0 ? 0x9C8FF0 : i % 5 == 0 ? 0x7FD4FF : 0xF4F0FF;
+            fx_line(s, scx + cosf(a) * (d2 - tail), scy + sinf(a) * (d2 - tail), scx + cosf(a) * d2,
+                    scy + sinf(a) * d2, c, al);
+        }
+        {   /* коробка сжимается в точку */
+            float sc = 1 - smooth(t / 0.6f);
+            int w = (int)((float)bw * sc), h = (int)((float)bh * sc);
+            if (w > 1 && h > 1)
+                fx_stretch(s, src, (float)bx, (float)by, (float)bw, (float)bh, (int)(scx - w / 2), (int)(scy - h / 2), w, h);
+        }
+        fx_flash(s, t < 0.72f ? smooth((t - 0.6f) / 0.12f) : 1 - smooth((t - 0.72f) / 0.2f));
+        if (t > 0.8f)
+            gfx_fill(s, 0, 0, ui->W, ui->H, ((uint32_t)(smooth((t - 0.8f) / 0.2f) * 255) << 24));
+        break;
+    }
+    case FX_DRIVE: {
+        /* диск выскакивает, коробка падает; в центре он разгоняется с шлейфом и лучами */
+        float up = smooth(t / 0.22f), fall = clampf((t - 0.15f) / 0.45f, 0, 1), go = smooth((t - 0.2f) / 0.3f);
+        float dcx = cx + ((float)ui->W / 2 - cx) * go, dcy = cy - (float)bh * 0.55f * up + ((float)ui->H / 2 - (cy - (float)bh * 0.55f)) * go;
+        float r = (float)bw * 0.46f * (1 + 0.5f * go), spin = t * t * 40.0f;
+        int i, ghosts = 5;
+        gfx_blit(s, src, 0, 0, 255);
+        /* на месте коробки — фон, сама коробка падает вниз с ускорением */
+        gfx_fill(s, bx - 4, by - 4, bw + 8, bh + 12, ui->th->bg_top);
+        gfx_fill(s, 0, 0, ui->W, ui->H, ((uint32_t)(smooth((t - 0.25f) / 0.35f) * 235) << 24) | 0x0B0A10);
+        if (t > 0.3f) {     /* лучи света за диском */
+            float a0 = t * 3.0f;
+            unsigned al = (unsigned)(smooth((t - 0.3f) / 0.3f) * 70);
+            for (i = 0; i < 16; i++) {
+                float a = a0 + (float)i * 6.2832f / 16, l = (float)ui->H;
+                int w;
+                for (w = -2; w <= 2; w++)
+                    fx_line(s, dcx, dcy, dcx + cosf(a + w * 0.012f) * l, dcy + sinf(a + w * 0.012f) * l,
+                            i % 2 ? 0x9C8FF0 : 0xF4F0FF, al);
+            }
+        }
+        if (fall < 1) {
+            int dy = (int)(fall * fall * (float)ui->H * 1.2f);
+            fx_stretch(s, src, (float)bx, (float)by, (float)bw, (float)bh, bx, by + dy, bw, bh);
+        }
+        for (i = ghosts; i >= 0; i--)   /* шлейф: прошлые положения блика */
+            gfx_disc(s, (int)dcx, (int)dcy, (int)r, spin - (float)i * 0.05f * (0.2f + t * 3), i ? 40 : 255);
+        if (up < 1)     /* пока диск выходит, перед ним снова коробка */
+            fx_stretch(s, src, (float)bx, (float)by, (float)bw, (float)bh, bx, by + (int)(fall * fall * (float)ui->H * 1.2f), bw, bh);
+        fx_flash(s, t < 0.82f ? smooth((t - 0.68f) / 0.14f) : 1 - smooth((t - 0.82f) / 0.15f));
+        if (t > 0.86f)
+            gfx_fill(s, 0, 0, ui->W, ui->H, ((uint32_t)(smooth((t - 0.86f) / 0.14f) * 255) << 24));
+        break;
+    }
+    default: {
+        /* рассыпание: от коробки бежит волна, полка осыпается крупными «плитками» */
+        int b = imax(6, ui->W / 12), x, y;
+        float maxd = sqrtf((float)(ui->W * ui->W + ui->H * ui->H));
+        gfx_fill(s, 0, 0, ui->W, ui->H, 0xFF0B0A10u);
+        for (y = 0; y < ui->H; y += b)
+            for (x = 0; x < ui->W; x += b) {
+                float mx = (float)x + (float)b / 2, my = (float)y + (float)b / 2;
+                float d = sqrtf((mx - cx) * (mx - cx) + (my - cy) * (my - cy)) / maxd;
+                int inbox = mx >= bx && mx < bx + bw && my >= by && my < by + bh;
+                float delay, lt, vx, vy, ox, oy, sc;
+                int sz;
+                fx_seed = (uint32_t)(x * 7919 + y * 104729 + 1);
+                vx = inbox ? (mx - cx) / (float)bw * 2.2f + (fx_frand() - 0.5f) : (fx_frand() - 0.5f) * 0.5f;
+                vy = inbox ? (my - cy) / (float)bh * 1.6f - 1.2f : -0.2f - fx_frand() * 0.4f;
+                delay = inbox ? 0.4f + fx_frand() * 0.06f : d * 0.7f + fx_frand() * 0.05f;
+                lt = (t - delay) / 0.55f;
+                if (lt >= 1)
+                    continue;
+                if (lt < 0)
+                    lt = 0;
+                /* плитка падает с ускорением и уменьшается — будто летит вниз и от камеры */
+                ox = vx * lt * (float)ui->W * 0.35f;
+                oy = (vy * lt + 2.6f * lt * lt) * (float)ui->H * 0.3f;
+                sc = inbox ? 1 + lt * 0.8f : 1 - lt * 0.45f;
+                sz = imax(1, (int)((float)b * sc));
+                fx_stretch(s, src, (float)x, (float)y, (float)b, (float)b,
+                           (int)(mx + ox - (float)sz / 2), (int)(my + oy - (float)sz / 2), sz, sz);
+            }
+        if (t > 0.38f && t < 0.52f)     /* «взрыв» коробки — короткая вспышка */
+            fx_flash(s, 0.45f * (1 - fabsf(t - 0.45f) / 0.07f));
+        if (t > 0.85f)
+            gfx_fill(s, 0, 0, ui->W, ui->H, ((uint32_t)(smooth((t - 0.85f) / 0.15f) * 255) << 24));
+        break;
+    }
+    }
+    (void)now;
 }
 
 static void draw_launch_overlay(Ui *ui, uint32_t now)
@@ -1003,6 +1180,10 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
     ui.cli_scale = cfg->scale;
     ui.tab = TAB_PLAY;
     settings_load(&ui);
+    {   /* вид анимации запуска; BT_LAUNCH_ANIM — посмотреть другие */
+        const char *e = getenv("BT_LAUNCH_ANIM");
+        ui.fx = e ? atoi(e) % FX_COUNT : FX_DRIVE;
+    }
     cfg->width = 400;
     cfg->height = 240;
     cfg->scale = SCALE_INTEGER;
@@ -1091,19 +1272,33 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
             ui.grid_scroll += (row - (float)visible_rows + 1 - ui.grid_scroll) * clampf(dt * 14.0f, 0, 1);
 
         load_covers(&ui, now);
-        draw_background(&ui, 0, ui.H);
-        if (ui.tab == TAB_PLAY)
-            draw_play(&ui, now);
-        else if (ui.tab == TAB_LIBRARY)
-            draw_library(&ui, now);
-        else
-            draw_settings(&ui);
-        draw_tabs(&ui);
-        if (ui.launch_t0)
-            draw_launch_overlay(&ui, now);
+        if (ui.launch_t0 && ui.snap.px) {
+            launch_fx(&ui, (float)(now - ui.launch_t0) / LAUNCH_MS, now);
+        } else {
+            uint32_t l0 = ui.launch_t0;
+            ui.launch_t0 = 0;           /* снимок полки — без анимации */
+            draw_background(&ui, 0, ui.H);
+            if (ui.tab == TAB_PLAY)
+                draw_play(&ui, now);
+            else if (ui.tab == TAB_LIBRARY)
+                draw_library(&ui, now);
+            else
+                draw_settings(&ui);
+            draw_tabs(&ui);
+            ui.launch_t0 = l0;
+            if (ui.launch_t0) {
+                ui.snap = image_new(ui.W, ui.H);
+                if (ui.snap.px) {
+                    memcpy(ui.snap.px, ui.scr->px, (size_t)ui.W * (size_t)ui.H * 4);
+                    launch_fx(&ui, 0, now);
+                } else
+                    draw_launch_overlay(&ui, now);
+            }
+        }
         platform_present();
 
         if (ui.launch_t0 && now - ui.launch_t0 >= LAUNCH_MS) {
+            image_free(&ui.snap);
             if (run_game(&ui, &ui.lib.games[ui.sel]))
                 running = 0;
             ui.launch_t0 = 0;
