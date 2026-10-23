@@ -31,6 +31,14 @@ BT_AUDIO_DUMP=звук.wav ./bt-j2me run игра.jar # записать вес�
 память всей программы ~13 МБ, бинарник после `make strip` ~310 КБ —
 вместе со встроенной библиотекой классов и шрифтами.
 
+## Скачать
+
+Готовые сборки лежат в [Releases](https://github.com/FLEXIY0/BT-J2ME/releases/latest):
+`bt-j2me.exe` (Windows), `bt-j2me.apk` (Android), `bt-j2me-linux-x86_64.tar.gz` (Linux).
+Их собирает GitHub Actions (`.github/workflows/build.yml`) после каждого изменения в основной
+ветке: выпуск получает номер `0.1.<номер сборки>`, APK подписан одним и тем же ключом и
+ставится поверх прошлой версии с сохранениями. Номер версии — `bt-j2me --version`.
+
 ## Сборка
 
 Нужны C-компилятор, `make`, `zlib` и `SDL2` (dev-пакеты). Java для сборки

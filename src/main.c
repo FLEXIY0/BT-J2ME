@@ -20,7 +20,9 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#define BT_VERSION "0.1.0-dev"
+#ifndef BT_VERSION
+#define BT_VERSION "0.1.0-dev"   /* в CI подставляется номер сборки: make VERSION=0.1.42 */
+#endif
 
 /* Минималистичная палитра: тёмный фон, один акцентный цвет. */
 #define COL_BG     0xFF101214u

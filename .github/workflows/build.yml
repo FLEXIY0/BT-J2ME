@@ -1,0 +1,137 @@
+# Сборка для всех устройств: Linux, Windows и Android.
+# На каждый пуш и PR — сборка и тесты; на пуш в основную ветку — ещё и выпуск (GitHub Release)
+# с номером 0.1.<номер сборки>: оттуда новые версии и забирают на все устройства.
+#
+# Ключ подписи APK (чтобы обновление ставилось поверх, не теряя сохранений) — секреты репозитория:
+#   ANDROID_KEYSTORE_B64       keystore в base64
+#   ANDROID_KEYSTORE_PASSWORD  пароль (тот же — у ключа bt-j2me)
+# Без них APK подписывается отладочным ключом и поверх прошлой версии не встанет.
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  VERSION: 0.1.${{ github.run_number }}
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Зависимости
+        run: sudo apt-get update && sudo apt-get install -y build-essential zlib1g-dev libsdl2-dev python3-pil
+      - name: Сборка
+        run: make -j"$(nproc)" && make strip
+      - name: Тесты
+        run: SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy make test
+      - name: Архив
+        run: |
+          mkdir -p dist/bt-j2me
+          cp bt-j2me README.md dist/bt-j2me/
+          tar czf dist/bt-j2me-linux-x86_64.tar.gz -C dist bt-j2me
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/bt-j2me-linux-x86_64.tar.gz
+
+  windows:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/bt-j2me
+          key: sdl2-mingw-2.30.9
+      - name: Зависимости
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 libz-mingw-w64-dev
+      - name: Сборка
+        run: sh tools/build-windows.sh
+      - name: Архив
+        run: |
+          mkdir -p dist/bt-j2me/games
+          cp dist/bt-j2me.exe dist/bt-j2me-console.exe README.md dist/bt-j2me/
+          (cd dist && zip -qr bt-j2me-windows-x64.zip bt-j2me)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/bt-j2me.exe
+            dist/bt-j2me-console.exe
+            dist/bt-j2me-windows-x64.zip
+
+  android:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.10.2
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/bt-j2me
+          key: sdl2-src-2.30.9
+      - name: Android SDK и NDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-34" "build-tools;34.0.0" "cmake;3.22.1" "ndk;23.2.8568313" > /dev/null
+      - name: Ключ подписи
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/bt-j2me.jks"
+            echo "BT_KEYSTORE=$RUNNER_TEMP/bt-j2me.jks" >> "$GITHUB_ENV"
+            echo "BT_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+          else
+            echo "::warning::нет секрета ANDROID_KEYSTORE_B64 — APK подписан отладочным ключом и поверх прошлой версии не встанет"
+          fi
+      - name: Сборка
+        env:
+          BT_VERSION: ${{ env.VERSION }}
+          BT_VERSION_CODE: ${{ github.run_number }}
+          GRADLE: gradle
+        run: sh tools/build-android.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: dist/bt-j2me.apk
+
+  release:
+    # выпуск — только из основной ветки репозитория
+    if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs: [linux, windows, android]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Файлы выпуска
+        run: |
+          mkdir -p rel
+          cp out/bt-j2me.exe out/bt-j2me-console.exe out/bt-j2me-windows-x64.zip \
+             out/bt-j2me-linux-x86_64.tar.gz out/bt-j2me.apk rel/
+          (cd rel && sha256sum * > SHA256SUMS.txt)
+          ls -l rel
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: BT-J2ME ${{ env.VERSION }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          make_latest: true
+          files: rel/*

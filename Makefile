@@ -5,6 +5,7 @@
 #   make CROSS=arm-linux-gnueabihf-   кросс-сборка (armhf, aarch64, i686, mipsel ...)
 #   make CFLAGS="-O2 -march=pentium2" сборка под конкретный старый процессор
 #   make STATIC=1                 статическая сборка (если есть статические libSDL2/libz)
+#   make VERSION=0.1.42           номер версии (его ставит CI)
 
 CROSS    ?=
 ifeq ($(origin CC),default)
@@ -16,6 +17,9 @@ BACKEND  ?= sdl2
 CFLAGS   ?= -Os -pipe
 override CFLAGS += -std=c99 -Wall -Wextra -Wno-unused-parameter
 override LDLIBS += -lz -lm
+ifdef VERSION
+override CFLAGS += -DBT_VERSION='"$(VERSION)"'
+endif
 
 ifeq ($(BACKEND),sdl2)
 SDL_CFLAGS := $(shell $(PKG) --cflags sdl2 2>/dev/null || sdl2-config --cflags)

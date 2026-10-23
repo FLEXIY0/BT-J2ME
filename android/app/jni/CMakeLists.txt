@@ -14,5 +14,8 @@ add_library(main SHARED
     ${BT}/jvm_core.c ${BT}/jvm_interp.c ${BT}/jvm_lib.c ${BT}/rt.c ${BT}/midp.c ${BT}/audio.c ${BT}/compat.c)
 # SDLActivity ищет в libmain.so функцию SDL_main
 target_compile_definitions(main PRIVATE main=SDL_main)
+if(BT_VERSION)
+    target_compile_definitions(main PRIVATE BT_VERSION="${BT_VERSION}")
+endif()
 target_compile_options(main PRIVATE -std=c99 -O2 -Wall -Wno-unused-parameter)
 target_link_libraries(main SDL2::SDL2 z m log android)

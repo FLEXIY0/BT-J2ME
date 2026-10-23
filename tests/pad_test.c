@@ -94,8 +94,32 @@ int main(void)
     SDL_JoystickSetVirtualAxis(joy, SDL_CONTROLLER_AXIS_LEFTX, 0);
     expect("стик в центре", EV_KEY_UP, KEY_LEFT);
 
-    SDL_JoystickSetVirtualButton(joy, SDL_CONTROLLER_BUTTON_GUIDE, 1);
-    expect("кнопка Xbox -> назад", EV_BACK, 0);
+    /* в игре View открывает меню паузы, B его закрывает (кнопку Xbox виртуальный геймпад SDL
+     * не присылает — она ведёт себя так же, как View) */
+    SDL_JoystickSetVirtualButton(joy, SDL_CONTROLLER_BUTTON_BACK, 1);
+    expect_none("View в игре — без событий");
+    if (!platform_paused()) {
+        printf("FAIL pad View в игре -> меню паузы: меню закрыто\n");
+        fails++;
+    } else {
+        printf("ok   pad View в игре -> меню паузы\n");
+    }
+    SDL_JoystickSetVirtualButton(joy, SDL_CONTROLLER_BUTTON_BACK, 0);
+    SDL_JoystickSetVirtualButton(joy, SDL_CONTROLLER_BUTTON_B, 1);
+    expect_none("B в меню паузы — без событий");
+    if (platform_paused()) {
+        printf("FAIL pad B закрывает меню паузы\n");
+        fails++;
+    } else {
+        printf("ok   pad B закрывает меню паузы\n");
+    }
+    SDL_JoystickSetVirtualButton(joy, SDL_CONTROLLER_BUTTON_B, 0);
+    expect("B отпущена после меню", EV_KEY_UP, KEY_SOFT_RIGHT);
+
+    /* на полке (режим курсора) View — клавиша 0: сменить обложку */
+    platform_cursor_mode(1);
+    SDL_JoystickSetVirtualButton(joy, SDL_CONTROLLER_BUTTON_BACK, 1);
+    expect("View на полке -> 0", EV_KEY_DOWN, KEY_NUM0);
 
     SDL_JoystickClose(joy);
     platform_shutdown();
