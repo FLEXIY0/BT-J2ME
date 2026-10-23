@@ -6,6 +6,9 @@
 #   ANDROID_KEYSTORE_B64       keystore в base64
 #   ANDROID_KEYSTORE_PASSWORD  пароль (тот же — у ключа bt-j2me)
 # Без них APK подписывается отладочным ключом и поверх прошлой версии не встанет.
+#
+# Выпуск публикует GITHUB_TOKEN: Settings → Actions → General → Workflow permissions →
+# «Read and write permissions». Или секрет RELEASE_TOKEN — личный токен с правом Contents: write.
 name: build
 
 on:
@@ -51,8 +54,12 @@ jobs:
         with:
           path: ~/.cache/bt-j2me
           key: sdl2-mingw-2.30.9
+      # MinGW из apt иногда ставится по 20 минут — пакеты кэшируются между сборками
       - name: Зависимости
-        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 libz-mingw-w64-dev
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: gcc-mingw-w64-x86-64 libz-mingw-w64-dev
+          version: 1
       - name: Сборка
         run: sh tools/build-windows.sh
       - name: Архив
@@ -138,3 +145,6 @@ jobs:
           generate_release_notes: true
           make_latest: true
           files: rel/*
+          # личный токен (секрет RELEASE_TOKEN, право Contents: write), если GITHUB_TOKEN
+          # в настройках репозитория только на чтение
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
