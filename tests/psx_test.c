@@ -92,6 +92,24 @@ int midp_title_shot(const char *id) { (void)id; return 0; }
 
 static int saved_x;
 
+/* Файл карты памяти этой игры называет сохранение name (в каталоге карты — его имя). */
+static int card_has(const char *name)
+{
+    char path[1200], buf[8192];
+    size_t n, i, k = strlen(name);
+    FILE *f;
+
+    snprintf(path, sizeof(path), "%s/save-Тест/pcsx-card1.mcd", out_dir);
+    if (!(f = bt_fopen(path, "rb")))
+        return 0;
+    n = fread(buf, 1, sizeof(buf), f);      /* каталог — в первом блоке */
+    fclose(f);
+    for (i = 0; i + k <= n; i++)
+        if (!memcmp(buf + i, name, k))
+            return 1;
+    return 0;
+}
+
 void platform_present(void)
 {
     int16_t buf[800 * 2];
@@ -144,6 +162,12 @@ int platform_poll(Event *ev)
     case 230:
         expect(near(sq_color(), 0xFF0000) && sq_x() == saved_x, "загрузка сохранения вернула красный квадрат на место");
         expect(audio_frames > 48000 * 3, "звук идёт");
+        ev->type = EV_KEY_DOWN; ev->key = KEY_GAME_Y; return 1;
+    case 235:
+        ev->type = EV_KEY_UP; ev->key = KEY_GAME_Y; return 1;
+    case 330:
+        expect(near(sq_color(), 0x0000FF), "△: игра записала файл на карту памяти через BIOS");
+        expect(card_has("BTTEST"), "запись есть в файле карты памяти");
         ev->type = EV_BACK; return 1;
     }
     return 0;
@@ -187,6 +211,12 @@ int main(int argc, char **argv)
         }
     }
     expect(r == MIDP_BACK, "выход на полку");
+    if (!getenv("BT_PSX_HLE")) {
+        char data[1024], ob[1100];
+        bt_data_dir(data, sizeof(data));
+        snprintf(ob, sizeof(ob), "%s/bios/openbios.bin", data);
+        expect(psx_is_bios(ob), "встроенный OpenBIOS распакован в папку данных");
+    }
     {
         char card[1200];
         FILE *f;
@@ -207,7 +237,7 @@ int main(int argc, char **argv)
         snprintf(bios, sizeof(bios), "%s/bios", root);
         bt_mkdirs(deep);
         bt_mkdirs(bios);
-        expect(!psx_bios_dir(deep, found, sizeof(found)), "без BIOS — встроенный HLE");
+        expect(!psx_bios_dir(deep, found, sizeof(found)), "своего BIOS нет — нашёлся только встроенный");
         snprintf(bios, sizeof(bios), "%s/bios/scph1001.bin", root);
         if ((f = bt_fopen(bios, "wb")) != NULL) {
             fseek(f, 512 * 1024 - 1, SEEK_SET);

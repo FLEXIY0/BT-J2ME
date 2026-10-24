@@ -9,6 +9,9 @@
 #include "util.h"
 
 #include "libretro.h"
+#include "openbios_bin.h"
+
+#include <zlib.h>
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -34,6 +37,7 @@ static struct {
     int16_t   rs_prev[2];
     int       frames;
     int       verbose;
+    int       hle;              /* BT_PSX_HLE=1: вместо BIOS — HLE ядра */
     retro_audio_buffer_status_callback_t buf_cb;
     /* опции ядра: умолчания приходят из SET_VARIABLES, поверх — наши */
     char      keys[128][48], vals[128][32];
@@ -47,7 +51,6 @@ static const char *const overrides[][2] = {
     { "pcsx_rearmed_rgb32_output", "enabled" },     /* ролики и заставки в 24 битах — без полос */
     { "pcsx_rearmed_frameskip_type", "auto" },      /* не успеваем — пропускаем отрисовку, не звук */
     { "pcsx_rearmed_frameskip_interval", "3" },
-    { "pcsx_rearmed_bios", "auto" },                /* настоящий BIOS, если есть, иначе HLE */
     { "pcsx_rearmed_show_bios_bootlogo", "disabled" },
     { "pcsx_rearmed_drc", "enabled" },
 };
@@ -94,6 +97,8 @@ static const char *opt_get(const char *key)
     size_t i;
     int k;
 
+    if (!strcmp(key, "pcsx_rearmed_bios"))         /* BIOS из sys_dir: свой или встроенный */
+        return P.hle ? "HLE" : "auto";
     for (i = 0; i < sizeof(overrides) / sizeof(overrides[0]); i++)
         if (!strcmp(overrides[i][0], key))
             return overrides[i][1];
@@ -377,6 +382,34 @@ int psx_bios_dir(const char *game_dir, char *out, size_t cap)
     return 0;
 }
 
+/* Встроенный OpenBIOS (PCSX-Redux, MIT; tools/build-openbios.sh) — в <данные>/bios/openbios.bin.
+ * Файл перезаписывается, только если его нет или он отличается (новая версия программы). */
+static int builtin_bios(char *dir, size_t cap)
+{
+    static uint8_t bin[512 * 1024], old[512 * 1024];
+    uLongf len = sizeof(bin);
+    char path[1200];
+    FILE *f;
+    size_t got = 0;
+
+    if (uncompress(bin, &len, openbios_z, sizeof(openbios_z)) != Z_OK || len != sizeof(bin))
+        return 0;
+    bt_data_dir(path, sizeof(path));
+    snprintf(dir, cap, "%.1000s/bios", path);
+    snprintf(path, sizeof(path), "%.1000s/openbios.bin", dir);
+    if ((f = bt_fopen(path, "rb")) != NULL) {
+        got = fread(old, 1, sizeof(old), f);
+        fclose(f);
+    }
+    if (got == sizeof(old) && !memcmp(old, bin, sizeof(bin)))
+        return 1;
+    bt_mkdirs(dir);
+    if (!(f = bt_fopen(path, "wb")))
+        return 0;
+    got = fwrite(bin, 1, sizeof(bin), f);
+    return (fclose(f) == 0) & (got == sizeof(bin));
+}
+
 static uint8_t *read_file(const char *path, size_t *len)
 {
     FILE *f = bt_fopen(path, "rb");
@@ -439,11 +472,14 @@ MidpResult psx_run(const char *path, const char *save_id, ScaleMode scale, char 
         game_dir[slash - game_dir] = '\0';
     else
         snprintf(game_dir, sizeof(game_dir), ".");
+    P.hle = getenv("BT_PSX_HLE") && *getenv("BT_PSX_HLE") && strcmp(getenv("BT_PSX_HLE"), "0");
     have_bios = psx_bios_dir(game_dir, P.sys_dir, sizeof(P.sys_dir));
+    if (!have_bios && !P.hle && !builtin_bios(P.sys_dir, sizeof(P.sys_dir)))
+        P.hle = 1;              /* не распаковался (нет места?) — остаётся HLE ядра */
     midp_save_dir(save_id, P.save_dir, sizeof(P.save_dir));
     bt_mkdirs(P.save_dir);
     snprintf(st_path, sizeof(st_path), "%s/state.sav", P.save_dir);
-    BT_LOG("PlayStation: %s, BIOS: %s\n", path, have_bios ? P.sys_dir : "нет, встроенный HLE");
+    BT_LOG("PlayStation: %s, BIOS: %s\n", path, P.hle ? "HLE ядра" : have_bios ? P.sys_dir : "встроенный OpenBIOS");
 
     retro_set_environment(environment);
     retro_set_video_refresh(video_cb);

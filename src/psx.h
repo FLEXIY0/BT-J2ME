@@ -15,7 +15,8 @@ int        psx_is_image(const char *path);
 int        psx_is_bios(const char *path);
 /* Где искать BIOS: <папка игры>/bios, сама папка игры, и так же выше — до четырёх уровней
  * (игра может лежать во вложенной папке полки). В out — папка, где он нашёлся, или
- * <папка игры>/bios, если его нет нигде (тогда ядро запустит встроенный HLE-BIOS). */
+ * <папка игры>/bios, если его нет нигде (тогда работает встроенный OpenBIOS, а с BT_PSX_HLE=1 —
+ * HLE-BIOS ядра). */
 int        psx_bios_dir(const char *game_dir, char *out, size_t cap);
 
 /* Запуск с полки: как nes_run, только для диска PS1. */

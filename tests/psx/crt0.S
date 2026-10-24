@@ -27,3 +27,39 @@ StartPad:
     li    $t2, 0xB0
     jr    $t2
     li    $t1, 0x13
+
+    .global InitCARD
+InitCARD:
+    li    $t2, 0xB0
+    jr    $t2
+    li    $t1, 0x4A
+
+    .global StartCARD
+StartCARD:
+    li    $t2, 0xB0
+    jr    $t2
+    li    $t1, 0x4B
+
+    .global bu_init
+bu_init:
+    li    $t2, 0xA0
+    jr    $t2
+    li    $t1, 0x55
+
+    .global bopen
+bopen:
+    li    $t2, 0xB0
+    jr    $t2
+    li    $t1, 0x32
+
+    .global bwrite
+bwrite:
+    li    $t2, 0xB0
+    jr    $t2
+    li    $t1, 0x35
+
+    .global bclose
+bclose:
+    li    $t2, 0xB0
+    jr    $t2
+    li    $t1, 0x36

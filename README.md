@@ -275,12 +275,18 @@ ARM64) игры идут через динамический перекомпи�
 на телевизоре, в любом разрешении игры (256…640 точек в ширину). Фильтры из меню паузы
 (ЭЛТ, «грубые пиксели» и др.) работают и здесь.
 
-**BIOS.** Лучше всего положить настоящий BIOS приставки (`scph1001.bin`, `scph5501.bin`,
-`scph7502.bin` и т. п., ровно 512 КБ) в папку `games/bios` — она создаётся сама. BIOS
-найдётся и в папке `bios` или среди файлов рядом с диском и выше по папкам; перетащенный
-на окно или добавленный на Android через «Добавить игры» BIOS сам ляжет в `bios`. Без BIOS ядро
-запускает встроенный HLE-BIOS: большинство игр работает и с ним, но совместимость ниже,
-и некоторые игры показывают чёрный экран или не видят карту памяти.
+**BIOS не нужен.** В программу встроен [OpenBIOS](https://github.com/pcsx-redux/nugget/tree/main/openbios)
+от авторов PCSX-Redux: свободная (MIT) замена BIOS PlayStation, написанная заново, без
+кода Sony. С ним грузится диск, работают пульт и карта памяти; PCSX-ReARMed в списке
+совместимых с ним эмуляторов, известных несовместимых игр — две: Azure Dreams (NTSC) и
+Wipeout (NTSC-U). Сборка — без оболочки с логотипом и меню: игра запускается сразу.
+При первом запуске диска он распаковывается в папку данных программы (`bios/openbios.bin`).
+
+Если игра с ним не идёт, есть два запасных пути: положить свой BIOS приставки
+(`scph1001.bin`, `scph5501.bin` и т. п., ровно 512 КБ) в папку `games/bios` — он главнее
+встроенного (найдётся и в `bios` или рядом с диском выше по папкам; перетащенный на окно
+или добавленный на Android BIOS сам ляжет в `bios`); или запустить с `BT_PSX_HLE=1` —
+тогда работает упрощённый HLE-BIOS самого ядра.
 
 | DualShock | Клавиатура            | Xbox-геймпад         |
 |-----------|-----------------------|----------------------|
@@ -387,6 +393,11 @@ ARM64) игры идут через динамический перекомпи�
 [third_party/pcsx_rearmed/COPYING](third_party/pcsx_rearmed/COPYING)). В `third_party/pcsx_rearmed`
 лежат только нужные для сборки файлы, без правок; что и как собирается, описано в
 `third_party/pcsx_rearmed.mk` (ПК) и `android/app/jni/CMakeLists.txt` (Android).
+Встроенный BIOS PlayStation — OpenBIOS из PCSX-Redux (MIT, см.
+[third_party/openbios/LICENSE](third_party/openbios/LICENSE)): `src/openbios_bin.h` —
+сжатый образ, собранный `tools/build-openbios.sh` из исходников (зеркало
+[pcsx-redux/nugget](https://github.com/pcsx-redux/nugget), коммит e2264e0, `BOOT_MODE=fast`).
+
 Проверочный диск `tests/psx/psxtest.iso.gz` собран из `tests/psx/psxtest.c`
 (`tests/psx/build.sh`, нужны `mipsel-linux-gnu-gcc` и `genisoimage`).
 

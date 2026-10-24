@@ -68,7 +68,10 @@ DISC="$OUT/psx/shelf/PS1/Test Disc"     # полка смотрит и во вл
 mkdir -p "$DISC" "$OUT/psx/shelf/bios"
 gunzip -c "$DIR/psx/psxtest.iso.gz" >"$OUT/psx/psxtest.iso"
 if [ -x "$DIR/psx_test" ]; then
-    check "PS1: диск, кнопки, сохранение" 0 "PSX DONE fails=0" timeout 60 "$DIR/psx_test" "$OUT/psx/psxtest.iso" "$OUT/psx"
+    check "PS1 (OpenBIOS): диск, кнопки, сохранения" 0 "PSX DONE fails=0" env XDG_DATA_HOME="$OUT/psx/data" \
+        timeout 60 "$DIR/psx_test" "$OUT/psx/psxtest.iso" "$OUT/psx/ob"
+    check "PS1 (HLE): диск, кнопки, сохранения" 0 "PSX DONE fails=0" env BT_PSX_HLE=1 XDG_DATA_HOME="$OUT/psx/data" \
+        timeout 60 "$DIR/psx_test" "$OUT/psx/psxtest.iso" "$OUT/psx/hle"
 fi
 if [ "${BT_BACKEND:-sdl2}" = sdl2 ] && command -v timeout >/dev/null 2>&1; then
     check "PS1: запуск диска" 124 "" env SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy XDG_DATA_HOME="$OUT/xdg" \
