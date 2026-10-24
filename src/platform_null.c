@@ -99,6 +99,7 @@ const char *platform_locale(void)
 }
 
 /* без графики обновлений нет */
+void update_cleanup(void) {}
 void update_check(void) {}
 UpdState update_state(void) { return UPD_IDLE; }
 const char *update_version(void) { return ""; }

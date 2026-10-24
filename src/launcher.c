@@ -2216,6 +2216,7 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
     platform_cursor_mode(1);
     prev = platform_ticks_ms();
     ui.upd_sel = 1;
+    update_cleanup();       /* старый файл от прошлого обновления */
     update_check();         /* в фоне: есть ли новый выпуск */
 
     while (running) {

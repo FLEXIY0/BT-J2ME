@@ -297,7 +297,6 @@ static int locate(void)
     wcscat(wnew, L".new");
     wcscpy(wold, wexe);
     wcscat(wold, L".old");
-    DeleteFileW(wold);          /* остался от прошлого обновления */
     base = wcsrchr(wexe, L'\\');
     WideCharToMultiByte(CP_UTF8, 0, base ? base + 1 : wexe, -1, name, sizeof(name), NULL, NULL);
     for (i = 0; name[i]; i++)
@@ -446,6 +445,52 @@ static int SDLCALL install_thread(void *u)
         SDL_AtomicSet(&st, UPD_FAILED);
     }
     return 0;
+}
+
+/* ---------- хвосты прошлого обновления ---------- */
+
+/* Windows: старый exe переименован в .old, но удалить его можно, лишь когда прошлый процесс
+ * закроется, — а новая версия стартует раньше. Поэтому пробуем в фоне, пока не выйдет
+ * (до ~30 с). Android: скачанный update.apk после установки не нужен. */
+#if defined(_WIN32) || defined(__ANDROID__)
+static int SDLCALL cleanup_thread(void *u)
+{
+#ifdef _WIN32
+    wchar_t old[MAX_PATH + 8];
+    int i;
+
+    (void)u;
+    if (!GetModuleFileNameW(NULL, old, MAX_PATH) || wcslen(old) + 5 >= MAX_PATH)
+        return 0;
+    wcscat(old, L".old");
+    for (i = 0; i < 150; i++) {
+        if (DeleteFileW(old) || GetLastError() == ERROR_FILE_NOT_FOUND)
+            return 0;
+        SDL_Delay(200);
+    }
+    BT_LOG("не удалось удалить старую версию программы\n");
+#elif defined(__ANDROID__)
+    const char *ext = SDL_AndroidGetExternalStoragePath();
+    char apk[1100];
+
+    (void)u;
+    if (ext) {
+        snprintf(apk, sizeof(apk), "%s/update.apk", ext);
+        remove(apk);
+    }
+#endif
+    return 0;
+}
+#endif
+
+void update_cleanup(void)
+{
+#if defined(_WIN32) || defined(__ANDROID__)
+    SDL_Thread *t = SDL_CreateThread(cleanup_thread, "update-cleanup", NULL);
+
+    if (t)
+        SDL_DetachThread(t);
+#endif
 }
 
 void update_check(void)

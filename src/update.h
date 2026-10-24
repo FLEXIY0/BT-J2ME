@@ -13,6 +13,9 @@ typedef enum {
     UPD_FAILED
 } UpdState;
 
+/* Убрать хвосты прошлого обновления (bt-j2me.exe.old, update.apk) — в фоне, при каждом запуске,
+ * даже если проверка обновлений выключена. */
+void        update_cleanup(void);
 void        update_check(void);         /* фоновая проверка, один раз за запуск */
 UpdState    update_state(void);
 const char *update_version(void);
