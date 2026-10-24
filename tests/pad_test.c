@@ -130,6 +130,68 @@ int main(void)
     platform_cursor_mode(1);
     SDL_JoystickSetVirtualButton(joy, SDL_CONTROLLER_BUTTON_BACK, 1);
     expect("View на полке -> 0", EV_KEY_DOWN, KEY_NUM0);
+    SDL_JoystickSetVirtualButton(joy, SDL_CONTROLLER_BUTTON_BACK, 0);
+    expect("View на полке отпущена", EV_KEY_UP, KEY_NUM0);
+    platform_cursor_mode(0);
+
+    /* PS1: кнопки DualShock по месту, курки — L2/R2, View — Select, View+Start — меню паузы */
+    platform_console_mode(CONSOLE_PSX);
+    SDL_JoystickSetVirtualButton(joy, SDL_CONTROLLER_BUTTON_A, 1);
+    expect("PS1: A -> ×", EV_KEY_DOWN, KEY_GAME_A);
+    SDL_JoystickSetVirtualButton(joy, SDL_CONTROLLER_BUTTON_A, 0);
+    expect("PS1: A отпущена", EV_KEY_UP, KEY_GAME_A);
+    SDL_JoystickSetVirtualButton(joy, SDL_CONTROLLER_BUTTON_Y, 1);
+    expect("PS1: Y -> △", EV_KEY_DOWN, KEY_GAME_Y);
+    SDL_JoystickSetVirtualButton(joy, SDL_CONTROLLER_BUTTON_Y, 0);
+    expect("PS1: Y отпущена", EV_KEY_UP, KEY_GAME_Y);
+    {
+        int hints = platform_hints();
+        SDL_JoystickSetVirtualButton(joy, SDL_CONTROLLER_BUTTON_LEFTSHOULDER, 1);
+        expect("PS1: LB -> L1", EV_KEY_DOWN, KEY_GAME_L1);
+        SDL_JoystickSetVirtualButton(joy, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, 1);
+        expect("PS1: RB -> R1", EV_KEY_DOWN, KEY_GAME_R1);
+        SDL_JoystickSetVirtualButton(joy, SDL_CONTROLLER_BUTTON_LEFTSHOULDER, 0);
+        expect("PS1: LB отпущена", EV_KEY_UP, KEY_GAME_L1);
+        SDL_JoystickSetVirtualButton(joy, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, 0);
+        expect("PS1: RB отпущена", EV_KEY_UP, KEY_GAME_R1);
+        if (platform_hints() != hints) {
+            printf("FAIL pad PS1: L1+R1 не прячет подсказки\n");
+            fails++;
+        } else {
+            printf("ok   pad PS1: L1+R1 не прячет подсказки\n");
+        }
+    }
+    /* у виртуального геймпада курок идёт от -32768 (отпущен) до 32767; SDL переводит в 0..32767 */
+    SDL_JoystickSetVirtualAxis(joy, SDL_CONTROLLER_AXIS_TRIGGERLEFT, 20000);
+    expect("PS1: LT -> L2", EV_KEY_DOWN, KEY_GAME_L2);
+    SDL_JoystickSetVirtualAxis(joy, SDL_CONTROLLER_AXIS_TRIGGERLEFT, -20000);
+    expect_none("PS1: курок у порога не дребезжит");
+    SDL_JoystickSetVirtualAxis(joy, SDL_CONTROLLER_AXIS_TRIGGERLEFT, -32768);
+    expect("PS1: LT отпущен", EV_KEY_UP, KEY_GAME_L2);
+    SDL_JoystickSetVirtualAxis(joy, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, 32767);
+    expect("PS1: RT -> R2", EV_KEY_DOWN, KEY_GAME_R2);
+    SDL_JoystickSetVirtualAxis(joy, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, -32768);
+    expect("PS1: RT отпущен", EV_KEY_UP, KEY_GAME_R2);
+    SDL_JoystickSetVirtualButton(joy, SDL_CONTROLLER_BUTTON_START, 1);
+    expect("PS1: Start", EV_KEY_DOWN, KEY_GAME_START);
+    SDL_JoystickSetVirtualButton(joy, SDL_CONTROLLER_BUTTON_START, 0);
+    expect("PS1: Start отпущена", EV_KEY_UP, KEY_GAME_START);
+    SDL_JoystickSetVirtualButton(joy, SDL_CONTROLLER_BUTTON_BACK, 1);
+    expect("PS1: View -> Select", EV_KEY_DOWN, KEY_GAME_SELECT);
+    if (platform_paused()) {
+        printf("FAIL pad PS1: View без Start меню не открывает\n");
+        fails++;
+    }
+    SDL_JoystickSetVirtualButton(joy, SDL_CONTROLLER_BUTTON_START, 1);
+    expect("PS1: View+Start отпускает Start", EV_KEY_UP, KEY_GAME_START);
+    expect("PS1: View+Start отпускает Select", EV_KEY_UP, KEY_GAME_SELECT);
+    if (!platform_paused()) {
+        printf("FAIL pad PS1: View+Start -> меню паузы: меню закрыто\n");
+        fails++;
+    } else {
+        printf("ok   pad PS1: View+Start -> меню паузы\n");
+    }
+    platform_console_mode(CONSOLE_OFF);
 
     SDL_JoystickClose(joy);
     platform_shutdown();

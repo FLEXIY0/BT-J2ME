@@ -33,7 +33,8 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- «Открыть с помощью» для .jar/.jad из файлового менеджера, браузера, Telegram -->
+            <!-- «Открыть с помощью» для .jar/.jad, картриджей NES и дисков PS1 из файлового менеджера,
+                 браузера, Telegram -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <action android:name="android.intent.action.SEND" />
@@ -43,6 +44,10 @@
                 <data android:mimeType="application/x-java-archive" />
                 <data android:mimeType="text/vnd.sun.j2me.app-descriptor" />
                 <data android:mimeType="application/x-nes-rom" />
+                <data android:mimeType="application/x-cue" />
+                <data android:mimeType="application/x-cd-image" />
+                <data android:mimeType="application/x-iso9660-image" />
+                <data android:mimeType="application/x-psp-pbp" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
@@ -55,6 +60,21 @@
                 <data android:pathPattern=".*\\.nes" />
                 <data android:pathPattern=".*\\..*\\.nes" />
                 <data android:pathPattern=".*\\.NES" />
+                <data android:pathPattern=".*\\.cue" />
+                <data android:pathPattern=".*\\..*\\.cue" />
+                <data android:pathPattern=".*\\.CUE" />
+                <data android:pathPattern=".*\\.bin" />
+                <data android:pathPattern=".*\\..*\\.bin" />
+                <data android:pathPattern=".*\\.BIN" />
+                <data android:pathPattern=".*\\.iso" />
+                <data android:pathPattern=".*\\..*\\.iso" />
+                <data android:pathPattern=".*\\.ISO" />
+                <data android:pathPattern=".*\\.img" />
+                <data android:pathPattern=".*\\..*\\.img" />
+                <data android:pathPattern=".*\\.IMG" />
+                <data android:pathPattern=".*\\.pbp" />
+                <data android:pathPattern=".*\\..*\\.pbp" />
+                <data android:pathPattern=".*\\.PBP" />
             </intent-filter>
         </activity>
         <provider

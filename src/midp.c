@@ -1428,7 +1428,8 @@ int midp_saves(const char *save_id, int erase)
     while ((name = bt_dir_next(d)) != NULL && n < 64) {
         size_t len = strlen(name);
         if (len > 4 && len < sizeof(names[0]) &&
-            (!strcmp(name + len - 4, ".rms") || !strcmp(name + len - 4, ".tmp") || !strcmp(name + len - 4, ".sav")))
+            (!strcmp(name + len - 4, ".rms") || !strcmp(name + len - 4, ".tmp") || !strcmp(name + len - 4, ".sav") ||
+             !strcmp(name + len - 4, ".mcd")))     /* .mcd — карта памяти PS1 */
             snprintf(names[n++], sizeof(names[0]), "%s", name);
     }
     bt_dir_close(d);

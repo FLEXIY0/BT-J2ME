@@ -16,7 +16,7 @@ BACKEND  ?= sdl2
 
 CFLAGS   ?= -Os -pipe
 override CFLAGS += -std=c99 -Wall -Wextra -Wno-unused-parameter
-override LDLIBS += -lz -lm
+override LDLIBS += -lz -lm -lpthread
 ifdef VERSION
 override CFLAGS += -DBT_VERSION='"$(VERSION)"'
 endif
@@ -35,9 +35,14 @@ endif
 SRC := src/main.c src/jar.c src/manifest.c src/classfile.c src/png.c src/gfx.c \
        src/library.c src/launcher.c src/platform_$(BACKEND).c \
        src/jvm_core.c src/jvm_interp.c src/jvm_lib.c src/rt.c src/midp.c src/audio.c src/compat.c \
-       src/nes.c src/nes_map.c src/nes_run.c \
+       src/nes.c src/nes_map.c src/nes_run.c src/psx_run.c \
        $(if $(filter sdl2,$(BACKEND)),src/touch.c src/multitap.c src/update.c)
 OBJ := $(SRC:.c=.o)
+
+# ядро PlayStation (PCSX-ReARMed, GPL-2): свой набор флагов, см. third_party/pcsx_rearmed.mk
+include third_party/pcsx_rearmed.mk
+OBJ += $(PSX_OBJ)
+src/psx_run.o: override CFLAGS += -I$(PSX_DIR)/deps/libretro-common/include
 
 bt-j2me: $(OBJ)
 	$(CC) $(LDFLAGS) -o $@ $(OBJ) $(LDLIBS)
@@ -51,7 +56,10 @@ tests/png_dump: tests/png_dump.c src/png.c src/png.h
 tests/pad_test: tests/pad_test.c src/platform_sdl2.c src/gfx.c src/touch.c src/multitap.c src/compat.c $(wildcard src/*.h)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/pad_test.c src/platform_sdl2.c src/gfx.c src/touch.c src/multitap.c src/compat.c $(LDLIBS)
 
-TEST_BINS := tests/png_dump $(if $(filter sdl2,$(BACKEND)),tests/pad_test)
+tests/psx_test: tests/psx_test.c src/psx_run.o src/gfx.o src/compat.o $(PSX_OBJ)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/psx_test.c src/psx_run.o src/gfx.o src/compat.o $(PSX_OBJ) -lz -lm -lpthread
+
+TEST_BINS := tests/png_dump tests/psx_test $(if $(filter sdl2,$(BACKEND)),tests/pad_test)
 
 test: bt-j2me $(TEST_BINS)
 	BT_BACKEND=$(BACKEND) sh tests/run.sh ./bt-j2me
@@ -60,7 +68,8 @@ strip: bt-j2me
 	$(CROSS)strip -s bt-j2me
 
 clean:
-	rm -f bt-j2me bt-j2me.exe src/*.o tests/png_dump tests/pad_test
+	rm -f bt-j2me bt-j2me.exe src/*.o tests/png_dump tests/pad_test tests/psx_test
+	find $(PSX_DIR) -name "*.o" -delete
 	rm -rf tests/out
 
 .PHONY: test strip clean

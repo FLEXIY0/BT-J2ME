@@ -11,6 +11,7 @@
 #include "launcher.h"
 #include "midp.h"
 #include "nes.h"
+#include "psx.h"
 #include "rt.h"
 #include "manifest.h"
 #include "platform.h"
@@ -32,11 +33,11 @@
 static void usage(void)
 {
     fprintf(stderr,
-        "BT-J2ME " BT_VERSION " — лёгкий запускатель J2ME-игр\n\n"
+        "BT-J2ME " BT_VERSION " — лёгкий запускатель J2ME-игр, NES и PlayStation\n\n"
         "  bt-j2me [папка] [опции]          меню-полка с играми (по умолчанию\n"
         "                                   $BT_J2ME_GAMES или ~/.local/share/bt-j2me/games)\n"
         "  bt-j2me info <игра.jar>          сведения о MIDlet и проверка классов\n"
-        "  bt-j2me run <игра.jar> [опции]   запустить игру сразу, без меню\n"
+        "  bt-j2me run <игра.jar> [опции]   запустить игру сразу, без меню\n"        "                                   (также .nes и диски PS1: .cue .bin .iso .img .pbp)\n"
         "  bt-j2me display-test [опции]     проверка экрана и клавиш\n"
         "  bt-j2me audio-render <звук> <out.wav> [--ott]\n"
         "                                   сыграть MIDI/WAV/AU/тоны/OTT в WAV-файл\n\n"
@@ -292,7 +293,7 @@ static int is_dir(const char *path)
     return bt_is_dir(path);
 }
 
-/* Существующий .jar или .jad. */
+/* Существующий .jar, .jad, .nes или образ диска PS1. */
 static int is_game_file(const char *path)
 {
     size_t n = strlen(path);
@@ -300,7 +301,8 @@ static int is_game_file(const char *path)
 
     if (n < 5 || path[n - 4] != '.' || (strcmp(path + n - 3, "jar") && strcmp(path + n - 3, "jad") &&
                                          strcmp(path + n - 3, "JAR") && strcmp(path + n - 3, "JAD") &&
-                                         strcmp(path + n - 3, "nes") && strcmp(path + n - 3, "NES")))
+                                         strcmp(path + n - 3, "nes") && strcmp(path + n - 3, "NES") &&
+                                         !psx_is_image(path)))
         return 0;
     if (!(f = bt_fopen(path, "rb")))
         return 0;
@@ -378,12 +380,15 @@ int main(int argc, char **argv)
             return 2;
         snprintf(base, sizeof(base), "%s", slash ? slash + 1 : argv[2]);
         n = strlen(base);
-        if (n > 4 && (strcmp(base + n - 4, ".jar") == 0 || strcmp(base + n - 4, ".nes") == 0))
+        if (n > 4 && (strcmp(base + n - 4, ".jar") == 0 || strcmp(base + n - 4, ".nes") == 0 ||
+                      psx_is_image(base)))
             base[n - 4] = '\0';
         if (platform_init(&cfg))
             return 1;
         if (n > 4 && strcmp(argv[2] + strlen(argv[2]) - 4, ".nes") == 0)
             r = nes_run(argv[2], base, cfg.scale, err, sizeof(err));
+        else if (psx_is_image(argv[2]))
+            r = psx_run(argv[2], base, cfg.scale, err, sizeof(err));
         else
             r = midp_run(argv[2], base, cfg.scale, err, sizeof(err));
         platform_shutdown();

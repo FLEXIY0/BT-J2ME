@@ -12,3 +12,5 @@ dist/
 /android/app/.cxx/
 /android/app/jni/SDL
 /android/local.properties
+/tests/psx_test
+/tests/*.exe

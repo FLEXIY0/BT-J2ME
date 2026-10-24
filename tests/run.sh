@@ -63,6 +63,27 @@ else
     fi
 fi
 
+# PlayStation: проверочный диск на встроенном HLE-BIOS — картинка, кнопки, сохранения, звук
+mkdir -p "$OUT/psx/shelf/bios"
+gunzip -c "$DIR/psx/psxtest.iso.gz" >"$OUT/psx/psxtest.iso"
+if [ -x "$DIR/psx_test" ]; then
+    check "PS1: диск, кнопки, сохранение" 0 "PSX DONE fails=0" timeout 60 "$DIR/psx_test" "$OUT/psx/psxtest.iso" "$OUT/psx"
+fi
+if [ "${BT_BACKEND:-sdl2}" = sdl2 ] && command -v timeout >/dev/null 2>&1; then
+    check "PS1: запуск диска" 124 "" env SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy XDG_DATA_HOME="$OUT/xdg" \
+        timeout 4 "$BIN" run "$OUT/psx/psxtest.iso" --windowed
+    # на полке — диск .cue с дорожкой .bin; сама дорожка и BIOS (512 КБ) коробками не становятся
+    head -c 2097152 /dev/zero >>"$OUT/psx/psxtest.iso"     # больше 1 МБ — как настоящая дорожка
+    python3 "$DIR/psx/iso2bin.py" "$OUT/psx/psxtest.iso" "$OUT/psx/shelf/Test Disc (Track 1).bin"
+    printf 'FILE "Test Disc (Track 1).bin" BINARY\r\n  TRACK 01 MODE2/2352\r\n    INDEX 01 00:00:00\r\n' \
+        >"$OUT/psx/shelf/Test Disc (USA).cue"
+    check "PS1: диск .cue/.bin" 124 "" env SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy XDG_DATA_HOME="$OUT/xdg" \
+        timeout 4 "$BIN" run "$OUT/psx/shelf/Test Disc (USA).cue" --windowed
+    head -c 524288 /dev/zero >"$OUT/psx/shelf/scph1001.bin"
+    check "PS1: полка с диском" 124 "" env SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy XDG_DATA_HOME="$OUT/xdg" \
+        timeout 3 "$BIN" "$OUT/psx/shelf" --windowed
+fi
+
 # Таблицы шрифтов должны быть отсортированы — по ним идёт двоичный поиск
 if command -v python3 >/dev/null 2>&1; then
     check "шрифты отсортированы" 0 "" python3 -c "

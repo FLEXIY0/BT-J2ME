@@ -156,7 +156,9 @@ public class MainActivity extends SDLActivity {
                     i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
                     i.putExtra(Intent.EXTRA_MIME_TYPES, new String[] { "application/java-archive",
                             "application/x-java-archive", "text/vnd.sun.j2me.app-descriptor",
-                            "application/octet-stream", "application/zip", "application/x-nes-rom" });
+                            "application/octet-stream", "application/zip", "application/x-nes-rom",
+                            "application/x-cue", "application/x-cd-image", "application/x-iso9660-image",
+                            "application/x-psp-pbp", "text/plain" });
                 } else {
                     i = new Intent(Intent.ACTION_GET_CONTENT);   /* Android 4.1–4.3: обычный выбор файла */
                 }
@@ -215,8 +217,10 @@ public class MainActivity extends SDLActivity {
             public void run() {
                 int copied = 0;
                 for (Uri u : uris)
-                    if (copy(u))
+                    if (copy(u)) {
                         copied++;
+                        copySiblings(u);
+                    }
                 if (copied > 0) {
                     try {
                         nativeGamesChanged();
@@ -250,8 +254,63 @@ public class MainActivity extends SDLActivity {
         return name.replace('/', '_').replace('\\', '_');
     }
 
-    /* Копирует JAR, JAD или картридж NES в папку игр. Файл без расширения узнаём по началу:
-     * ZIP — JAR, «NES\x1A» — картридж. */
+    private static boolean isDisc(String lower) {
+        return lower.endsWith(".cue") || lower.endsWith(".bin") || lower.endsWith(".iso") ||
+               lower.endsWith(".img") || lower.endsWith(".pbp");
+    }
+
+    /* Дорожки, которые называет .cue (FILE "…"). */
+    private static List<String> cueFiles(File cue) {
+        List<String> names = new ArrayList<String>();
+        try {
+            java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(cue));
+            String line;
+            while ((line = r.readLine()) != null) {
+                line = line.trim();
+                if (!line.regionMatches(true, 0, "FILE ", 0, 5))
+                    continue;
+                line = line.substring(5).trim();
+                int end = line.startsWith("\"") ? line.indexOf('"', 1) : line.indexOf(' ');
+                String f = line.startsWith("\"") ? (end > 0 ? line.substring(1, end) : null)
+                                                 : (end > 0 ? line.substring(0, end) : line);
+                if (f != null && f.length() > 0)
+                    names.add(new File(f.replace('\\', '/')).getName());
+            }
+            r.close();
+        } catch (Exception e) {
+            // не текст — нечего искать
+        }
+        return names;
+    }
+
+    /* Диск PS1 открыли файлом (file://): к .cue забираем его дорожки, к .bin — одноимённый .cue.
+     * У content:// соседей не видно — тогда .cue и .bin выбирают вместе в «Добавить игры». */
+    private void copySiblings(Uri uri) {
+        if (!"file".equals(uri.getScheme()) || uri.getPath() == null)
+            return;
+        File src = new File(uri.getPath());
+        String lower = src.getName().toLowerCase(Locale.ROOT);
+        File dir = gamesDir();
+        if (lower.endsWith(".bin")) {
+            String stem = src.getName().substring(0, src.getName().length() - 4);
+            File cue = new File(src.getParentFile(), stem + ".cue");
+            if (cue.exists())
+                copy(Uri.fromFile(cue));
+        }
+        if (lower.endsWith(".cue") || lower.endsWith(".bin")) {
+            File cue = lower.endsWith(".cue") ? new File(dir, src.getName())
+                    : new File(dir, src.getName().substring(0, src.getName().length() - 4) + ".cue");
+            for (String f : cueFiles(cue)) {
+                File track = new File(src.getParentFile(), f);
+                if (track.exists() && !new File(dir, f).exists())
+                    copy(Uri.fromFile(track));
+            }
+        }
+    }
+
+    /* Копирует JAR, JAD, картридж NES или диск PS1 в папку игр. Файл без расширения узнаём
+     * по началу: ZIP — JAR, «NES\x1A» — картридж, «\0PBP» — диск PS1 из PSN.
+     * BIOS PlayStation (.bin ровно 512 КБ) кладём в папку bios рядом с играми. */
     private boolean copy(Uri uri) {
         String name = displayName(uri);
         String lower = name.toLowerCase(Locale.ROOT);
@@ -268,9 +327,12 @@ public class MainActivity extends SDLActivity {
                 return false;
             boolean zip = n >= 2 && buf[0] == 'P' && buf[1] == 'K';
             boolean nes = n >= 4 && buf[0] == 'N' && buf[1] == 'E' && buf[2] == 'S' && buf[3] == 0x1A;
-            if (!lower.endsWith(".jar") && !lower.endsWith(".jad") && !lower.endsWith(".nes")) {
+            boolean pbp = n >= 4 && buf[0] == 0 && buf[1] == 'P' && buf[2] == 'B' && buf[3] == 'P';
+            if (!lower.endsWith(".jar") && !lower.endsWith(".jad") && !lower.endsWith(".nes") && !isDisc(lower)) {
                 if (nes)
                     name = name + ".nes";      /* картридж NES без расширения */
+                else if (pbp)
+                    name = name + ".pbp";
                 else if (zip)
                     name = name + ".jar";
                 else
@@ -284,6 +346,10 @@ public class MainActivity extends SDLActivity {
             } while ((n = in.read(buf)) > 0);
             out.close();
             out = null;
+            if (lower.endsWith(".bin") && tmp.length() == 512 * 1024) {
+                dir = new File(dir, "bios");
+                dir.mkdirs();
+            }
             File dst = new File(dir, name);
             dst.delete();
             if (!tmp.renameTo(dst))

@@ -6,12 +6,12 @@
 
 #include "gfx.h"
 
-enum { GAME_J2ME, GAME_NES };
+enum { GAME_J2ME, GAME_NES, GAME_PSX };
 
 typedef struct {
     char     path[1024];
-    char     base[256];     /* имя файла без .jar/.nes — по нему ищется обложка */
-    int      kind;          /* GAME_J2ME или GAME_NES */
+    char     base[256];     /* имя файла без .jar/.nes/.cue — по нему ищется обложка */
+    int      kind;          /* GAME_J2ME, GAME_NES или GAME_PSX */
     char     name[128], vendor[128], version[32], profile[32];
     long     size;
     Image    icon;          /* иконка MIDlet из JAR, может быть пустой */
@@ -29,6 +29,8 @@ typedef struct {
 } Library;
 
 int  library_scan(Library *lib, const char *dir);
+/* Файлы дорожек, которые называет .cue (FILE "…"): имена без пути, не больше max. */
+int  library_cue_files(const char *cue_path, char (*out)[256], int max);
 void library_free(Library *lib);
 
 /* Ищет <имя>.png рядом с JAR или в covers/<имя>.png; если нет — рисует обложку сама. */

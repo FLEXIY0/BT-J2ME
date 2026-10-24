@@ -3,6 +3,7 @@
 #include "jar.h"
 #include "manifest.h"
 #include "png.h"
+#include "psx.h"
 #include "compat.h"
 #include "util.h"
 
@@ -85,11 +86,10 @@ static void read_game(Game *g)
     jar_close(&jar);
 }
 
-/* Картридж NES: название — из имени файла без пометок дампа «(U) [!]», подзаголовок — NES. */
-static void read_nes(Game *g)
+/* Название из имени файла: «_» — пробелы, без пометок дампа «(U) [!]», «(USA) (Disc 1)». */
+static void name_from_file(Game *g)
 {
     char *p, *o;
-    FILE *f;
 
     snprintf(g->name, sizeof(g->name), "%.127s", g->base);
     for (p = g->name; *p; p++)
@@ -99,11 +99,82 @@ static void read_nes(Game *g)
         *p = '\0';
     for (o = g->name + strlen(g->name); o > g->name && o[-1] == ' '; o--)
         o[-1] = '\0';
-    copy_str(g->profile, sizeof(g->profile), "NES");
-    if ((f = bt_fopen(g->path, "rb")) != NULL) {
+}
+
+static long file_size(const char *path)
+{
+    FILE *f = bt_fopen(path, "rb");
+    long n = 0;
+
+    if (f) {
         if (fseek(f, 0, SEEK_END) == 0)
-            g->size = ftell(f);
+            n = ftell(f);
         fclose(f);
+    }
+    return n;
+}
+
+/* Картридж NES: подзаголовок — NES. */
+static void read_nes(Game *g)
+{
+    name_from_file(g);
+    copy_str(g->profile, sizeof(g->profile), "NES");
+    g->size = file_size(g->path);
+}
+
+int library_cue_files(const char *cue_path, char (*out)[256], int max)
+{
+    FILE *f = bt_fopen(cue_path, "r");
+    char line[600];
+    int n = 0;
+
+    if (!f)
+        return 0;
+    while (n < max && fgets(line, sizeof(line), f)) {
+        char *p = line, *e;
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (strncasecmp(p, "FILE", 4) != 0 || (p[4] != ' ' && p[4] != '\t'))
+            continue;
+        p += 5;
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (*p == '"') {
+            e = strchr(++p, '"');
+        } else {
+            e = p;
+            while (*e && *e != ' ' && *e != '\t' && *e != '\r' && *e != '\n')
+                e++;
+        }
+        if (!e || e == p)
+            continue;
+        *e = '\0';
+        if (strrchr(p, '/'))
+            p = strrchr(p, '/') + 1;
+        if (strrchr(p, '\\'))
+            p = strrchr(p, '\\') + 1;
+        snprintf(out[n++], 256, "%s", p);
+    }
+    fclose(f);
+    return n;
+}
+
+/* Диск PS1: размер — всех дорожек .cue или самого образа, подзаголовок — PS1. */
+static void read_psx(Game *g, const char *dir)
+{
+    size_t n = strlen(g->path);
+
+    name_from_file(g);
+    copy_str(g->profile, sizeof(g->profile), "PS1");
+    if (n > 4 && strcasecmp(g->path + n - 4, ".cue") == 0) {
+        char files[16][256], path[1400];
+        int k = library_cue_files(g->path, files, 16), i;
+        for (i = 0; i < k; i++) {
+            snprintf(path, sizeof(path), "%.1000s/%.255s", dir, files[i]);
+            g->size += file_size(path);
+        }
+    } else {
+        g->size = file_size(g->path);
     }
 }
 
@@ -112,22 +183,74 @@ static int by_name(const void *a, const void *b)
     return strcasecmp(((const Game *)a)->name, ((const Game *)b)->name);
 }
 
+static int has_ext(const char *name, const char *ext)
+{
+    size_t n = strlen(name);
+    return n >= 5 && strcasecmp(name + n - 4, ext) == 0;
+}
+
+/* Образ .bin на полку не попадает, если это BIOS, дорожка из .cue или рядом лежит одноимённый .cue. */
+static int lone_bin(const char *dir, const char *name, char (*names)[256], int count, char (*tracks)[256],
+                    int ntracks)
+{
+    char path[1400];
+    size_t n = strlen(name);
+    int i;
+
+    for (i = 0; i < ntracks; i++)
+        if (!strcasecmp(tracks[i], name))
+            return 0;
+    for (i = 0; i < count; i++)
+        if (has_ext(names[i], ".cue") && strlen(names[i]) == n && !strncasecmp(names[i], name, n - 4))
+            return 0;
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    return !psx_is_bios(path) && file_size(path) > (1L << 20);
+}
+
 int library_scan(Library *lib, const char *dir)
 {
     BtDir *d;
     const char *name;
-    int cap = 0;
+    int cap = 0, count = 0, ncap = 0, ntracks = 0, j;
+    char (*names)[256] = NULL, (*tracks)[256] = NULL;
 
     memset(lib, 0, sizeof(*lib));
     copy_str(lib->dir, sizeof(lib->dir), dir);
     if (!(d = bt_dir_open(dir)))
         return -1;
+    /* сначала все имена: чтобы скрыть дорожки .bin, надо знать, что называют .cue */
     while ((name = bt_dir_next(d)) != NULL) {
-        size_t n = strlen(name);
-        int nes = n >= 5 && strcasecmp(name + n - 4, ".nes") == 0;
+        if (strlen(name) >= 256)
+            continue;
+        if (count == ncap) {
+            char (*nn)[256] = realloc(names, (size_t)(ncap = ncap ? ncap * 2 : 64) * 256);
+            if (!nn)
+                break;
+            names = nn;
+        }
+        snprintf(names[count++], 256, "%s", name);
+    }
+    bt_dir_close(d);
+    for (j = 0; j < count; j++)
+        if (has_ext(names[j], ".cue")) {
+            char path[1400], (*nt)[256] = realloc(tracks, (size_t)(ntracks + 16) * 256);
+            if (!nt)
+                break;
+            tracks = nt;
+            snprintf(path, sizeof(path), "%s/%s", dir, names[j]);
+            ntracks += library_cue_files(path, tracks + ntracks, 16);
+        }
+    for (j = 0; j < count; j++) {
+        size_t n;
+        int nes, psx;
         Game *g;
 
-        if (n < 5 || (strcasecmp(name + n - 4, ".jar") != 0 && !nes) || n - 4 >= sizeof(g->base))
+        name = names[j];
+        n = strlen(name);
+        nes = has_ext(name, ".nes");
+        psx = has_ext(name, ".cue") || has_ext(name, ".iso") || has_ext(name, ".img") || has_ext(name, ".pbp") ||
+              (has_ext(name, ".bin") && lone_bin(dir, name, names, count, tracks, ntracks));
+        if (n < 5 || (!has_ext(name, ".jar") && !nes && !psx) || n - 4 >= sizeof(g->base))
             continue;
         if (lib->count == cap) {
             Game *ng = realloc(lib->games, (size_t)(cap = cap ? cap * 2 : 16) * sizeof(Game));
@@ -140,13 +263,16 @@ int library_scan(Library *lib, const char *dir)
         snprintf(g->path, sizeof(g->path), "%s/%s", dir, name);
         memcpy(g->base, name, n - 4);
         g->base[n - 4] = '\0';
-        g->kind = nes ? GAME_NES : GAME_J2ME;
+        g->kind = nes ? GAME_NES : psx ? GAME_PSX : GAME_J2ME;
         if (nes)
             read_nes(g);
+        else if (psx)
+            read_psx(g, dir);
         else
             read_game(g);
     }
-    bt_dir_close(d);
+    free(names);
+    free(tracks);
     if (lib->count)
         qsort(lib->games, (size_t)lib->count, sizeof(Game), by_name);
     return 0;
@@ -194,6 +320,33 @@ static uint32_t hsv(unsigned h, unsigned s, unsigned v)   /* h 0..359, s/v 0..25
 /* Обложка без надписей: цветной фон по хэшу названия, полиграфическая штриховка,
  * «логотип-овал» сверху и крупная пиксельная иконка игры (или диск, если иконки нет). */
 static int imax(int a, int b) { return a > b ? a : b; }
+
+/* Диск PS1: тёмная рабочая сторона с фиолетово-синим отливом, прозрачное кольцо у центра. */
+static void psx_disc(Image *d, int cx, int cy, int r, unsigned hue)
+{
+    int hole = r / 7, ring = r * 2 / 5, x, y;
+    uint32_t tint = hsv((hue + 240) % 360, 90, 120);
+
+    for (y = -r; y <= r; y++)
+        for (x = -r; x <= r; x++) {
+            int px = cx + x, py = cy + y, dd = x * x + y * y;
+            uint32_t c;
+            float a, sheen;
+            if (px < 0 || py < 0 || px >= d->w || py >= d->h || dd > r * r || dd < hole * hole)
+                continue;
+            if (dd < ring * ring)
+                c = dd > (ring - 2) * (ring - 2) ? 0xFF5A5E68u : 0xFFB9BDC6u;
+            else if (dd > (r - 2) * (r - 2))
+                c = 0xFF2A2C33u;
+            else {
+                a = atan2f((float)y, (float)x);
+                sheen = cosf(a * 2 + 0.6f);
+                sheen = sheen > 0.5f ? (sheen - 0.5f) * 2 : 0;
+                c = gfx_mix(0xFF101116u, tint, (unsigned)(60 + sheen * 150));
+            }
+            d->px[py * d->w + px] = c;
+        }
+}
 
 static Image make_cover(const Game *g, int w, int h)
 {
@@ -243,6 +396,8 @@ static Image make_cover(const Game *g, int w, int h)
         gfx_fill(&c, cx + cw / 8, cy + ch / 8, cw * 3 / 4, ch / 12, 0x50FFFFFFu);
         for (i = 0; i < 5; i++)
             gfx_fill(&c, cx + cw / 6 + i * (cw * 2 / 3) / 5, cy + ch * 3 / 4, imax(1, cw / 24), ch / 6, 0xFF6C6A74u);
+    } else if (g->kind == GAME_PSX) {
+        psx_disc(&c, w / 2, band + (h - band) / 2, w * 3 / 8, hue);
     } else {
         gfx_disc(&c, w / 2, band + (h - band) / 2, w / 3, (float)(hs % 100) / 100.0f, 255);
     }

@@ -3,6 +3,7 @@
 #include "library.h"
 #include "midp.h"
 #include "nes.h"
+#include "psx.h"
 #include "compat.h"
 #include "png.h"
 #include "audio.h"
@@ -1201,6 +1202,7 @@ static int run_game(Ui *ui, Game *g)
         platform_fade_in(700);     /* анимация ушла в черноту — игра из неё проявляется */
     platform_cursor_mode(0);        /* в игре стик снова крестовина, указатель — системный */
     r = g->kind == GAME_NES ? nes_run(g->path, g->base, mode, err, sizeof(err))
+      : g->kind == GAME_PSX ? psx_run(g->path, g->base, mode, err, sizeof(err))
                             : midp_run(g->path, g->base, mode, err, sizeof(err));
     platform_cursor_mode(1);
     ui->cur_press = 0;
@@ -1937,6 +1939,16 @@ static int ends_with(const char *s, const char *ext)
     return 1;
 }
 
+static int file_exists(const char *path)
+{
+    FILE *f = bt_fopen(path, "rb");
+
+    if (!f)
+        return 0;
+    fclose(f);
+    return 1;
+}
+
 static int copy_file(const char *src, const char *dst)
 {
     FILE *in = bt_fopen(src, "rb"), *out;
@@ -1959,6 +1971,61 @@ static int copy_file(const char *src, const char *dst)
     return ok;
 }
 
+/* Диск PS1: .cue переносим вместе с дорожками, к .bin — его .cue, если лежит рядом;
+ * BIOS (.bin ровно 512 КБ) — в папку bios. Образы большие, копирование занимает время. */
+static int import_psx(const char *games_dir, const char *path, const char *name)
+{
+    char dst[1200], cue[1200], src_dir[1024], files[16][256], from[1400], to[1400];
+    int k, i;
+    size_t n = strlen(path);
+
+    if (psx_is_bios(path)) {
+        snprintf(dst, sizeof(dst), "%s/bios", games_dir);
+        bt_mkdirs(dst);
+        snprintf(dst, sizeof(dst), "%s/bios/%s", games_dir, name);
+        if (!copy_file(path, dst))
+            return 0;
+        BT_LOG("добавлен BIOS PlayStation: %s\n", dst);
+        return 1;
+    }
+    snprintf(src_dir, sizeof(src_dir), "%.*s", (int)(name - path > 0 ? name - path - 1 : 0), path);
+    if (!src_dir[0])
+        snprintf(src_dir, sizeof(src_dir), ".");
+    snprintf(cue, sizeof(cue), "%.*s.cue", (int)(n - 4), path);
+    if (!ends_with(path, ".cue") && (!ends_with(path, ".bin") || !file_exists(cue)))
+        cue[0] = '\0';
+    else if (ends_with(path, ".cue"))
+        snprintf(cue, sizeof(cue), "%s", path);
+    bt_mkdirs(games_dir);
+    if (!cue[0]) {                  /* один файл: .iso, .img, .pbp или .bin без .cue */
+        snprintf(dst, sizeof(dst), "%s/%s", games_dir, name);
+        if (!copy_file(path, dst))
+            return 0;
+        snprintf(import_sel, sizeof(import_sel), "%.1000s", dst);
+        BT_LOG("добавлена игра: %s\n", dst);
+        return 1;
+    }
+    k = library_cue_files(cue, files, 16);
+    for (i = 0; i < k; i++) {
+        snprintf(from, sizeof(from), "%.1000s/%.255s", src_dir, files[i]);
+        snprintf(to, sizeof(to), "%.1000s/%.255s", games_dir, files[i]);
+        if (!copy_file(from, to)) {
+            BT_LOG("не удалось добавить дорожку %s\n", from);
+            return 0;
+        }
+    }
+    name = cue;
+    for (i = 0; cue[i]; i++)
+        if (cue[i] == '/' || cue[i] == '\\')
+            name = cue + i + 1;
+    snprintf(dst, sizeof(dst), "%.900s/%.255s", games_dir, name);
+    if (!copy_file(cue, dst))
+        return 0;
+    snprintf(import_sel, sizeof(import_sel), "%.1000s", dst);
+    BT_LOG("добавлена игра: %s\n", dst);
+    return 1;
+}
+
 int launcher_import(const char *games_dir, const char *path)
 {
     const char *name = path, *p;
@@ -1966,6 +2033,12 @@ int launcher_import(const char *games_dir, const char *path)
     FILE *f;
     int jar = ends_with(path, ".jar"), nes = ends_with(path, ".nes");
 
+    if (psx_is_image(path)) {
+        for (p = path; *p; p++)
+            if (*p == '/' || *p == '\\')
+                name = p + 1;
+        return import_psx(games_dir, path, name);
+    }
     if (!jar && !nes && !ends_with(path, ".jad"))
         return 0;
     for (p = path; *p; p++)

@@ -136,7 +136,7 @@ MidpResult nes_run(const char *path, const char *save_id, ScaleMode scale, char 
     }
 
     platform_touch_profile(save_id);
-    platform_console_mode(1);
+    platform_console_mode(CONSOLE_NES);
     top = nes_region(n) == NES_NTSC ? 8 : 0;    /* NTSC-телевизор не показывал верх и низ по 8 строк */
     platform_set_screen(256, 240 - 2 * top, scale);
     audio_reset();          /* звук полки (аккорд запуска) отдаёт устройство картриджу */
@@ -242,7 +242,7 @@ MidpResult nes_run(const char *path, const char *save_id, ScaleMode scale, char 
     }
     if (rate > 0)
         platform_audio_close();
-    platform_console_mode(0);
+    platform_console_mode(CONSOLE_OFF);
     platform_touch_profile(NULL);
     nes_destroy(n);
     return result;

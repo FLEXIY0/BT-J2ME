@@ -66,6 +66,11 @@ int platform_audio_open(int rate, AudioMixFn mix)
     return 0;
 }
 
+int platform_audio_open_stereo(int rate, AudioMixFn mix)
+{
+    return platform_audio_open(rate, mix);
+}
+
 void platform_audio_lock(int on) { (void)on; }
 void platform_audio_close(void) {}
 
@@ -84,7 +89,8 @@ void platform_set_fullscreen(int on) { (void)on; }
 void platform_stick(float *x, float *y) { *x = *y = 0; }
 int platform_open_url(const char *url) { (void)url; return 0; }
 int platform_touch_wide(void) { return 0; }
-void platform_console_mode(int on) { (void)on; }
+void platform_console_mode(int mode) { (void)mode; }
+void platform_set_aspect(int w, int h) { (void)w; (void)h; }
 int platform_game_size(const char *id, int *w, int *h) { (void)id; (void)w; (void)h; return 0; }
 const char *platform_locale(void)
 {

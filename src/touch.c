@@ -12,7 +12,8 @@
 
 #define MAX_ELEMS   40
 #define MAX_FINGERS 10
-#define KEY_SLOTS   80          /* коды клавиш -8..57 → индекс key + 16 */
+#define KEY_OFS     32
+#define KEY_SLOTS   96          /* коды клавиш -32..63 → индекс key + KEY_OFS */
 #define TEX_CACHE   96
 
 enum { E_KEY, E_STICK, E_PAD, E_MENU, E_SHOT };
@@ -20,7 +21,7 @@ enum { F_NONE, F_KEY, F_PANEL, F_STICK, F_POINTER, F_EDIT_DRAG, F_EDIT_UI, F_KBD
 enum { P_NONE, P_KEYPAD, P_KEYBOARD };
 
 /* Подписи, которых нет среди кодов клавиш */
-enum { L_PAD = 1000, L_MENU, L_STICK, L_KNOB, L_PLUS, L_MINUS, L_EYE, L_CHECK, L_RESET, L_TRASH,
+enum { L_PAD = 1000, L_DPAD, L_MENU, L_STICK, L_KNOB, L_PLUS, L_MINUS, L_EYE, L_CHECK, L_RESET, L_TRASH,
        L_SIZE, L_WAY4, L_WAY8, L_WIDE, L_TALL, L_LATCH, L_LATCH_ON, L_CAMERA, L_SHIFT, L_SHIFT_ON, L_BKSP, L_123, L_ABC, L_RU, L_EN, L_SPACE, L_ENTER, L_DOT,
        L_CHAR = 2000 /* + код символа */ };
 enum { S_NORMAL, S_PRESSED, S_CHIP, S_CHIP_ON };
@@ -58,6 +59,7 @@ static struct {
     TouchEmit     emit;
     SDL_Haptic   *haptic;
     int           game;         /* в игре: показываем кнопки */
+    int           console;      /* CONSOLE_PSX — кнопки DualShock, стик становится крестовиной */
     char          id[256];
     Layout        lay[2];       /* 0 — портрет, 1 — альбом */
     float         opacity;
@@ -82,6 +84,12 @@ static int land(void) { return T.W > T.H; }
 static Layout *cur(void) { return &T.lay[land()]; }
 static float unit(void) { return (float)(T.W < T.H ? T.W : T.H) / 100.0f; }
 
+/* △ ○ × □ — круглые кнопки справа. */
+static int is_face(int key)
+{
+    return key == KEY_GAME_A || key == KEY_GAME_B || key == KEY_GAME_X || key == KEY_GAME_Y;
+}
+
 static void elem_size(const Elem *e, float *w, float *h)
 {
     float u = unit() * e->s;
@@ -90,7 +98,16 @@ static void elem_size(const Elem *e, float *w, float *h)
     case E_STICK: *w = *h = 34 * u; break;
     case E_PAD: case E_MENU: case E_SHOT: *w = *h = 10 * u; break;
     default:
-        if (e->key == KEY_FIRE)
+        if (is_face(e->key))
+            *w = *h = 15 * u;
+        else if (e->key >= KEY_GAME_R2 && e->key <= KEY_GAME_L1) {
+            *w = 17 * u;    /* плечевые L1/R1/L2/R2 — широкие, как на DualShock */
+            *h = 9 * u;
+        } else if (e->key == KEY_GAME_START || e->key == KEY_GAME_SELECT || e->key == KEY_GAME_L3 ||
+                   e->key == KEY_GAME_R3) {
+            *w = 14 * u;
+            *h = 7 * u;
+        } else if (e->key == KEY_FIRE)
             *w = *h = 24 * u;
         else if (e->key == KEY_SOFT_LEFT || e->key == KEY_SOFT_RIGHT) {
             *w = 20 * u;
@@ -127,6 +144,60 @@ static void add(Layout *L, int type, int key, float x, float y, float s)
 
 static float clampf(float v, float a, float b) { return v < a ? a : v > b ? b : v; }
 
+/* Ромб △○×□ с центром (cx, cy) в точках экрана. */
+static void add_face(Layout *L, float cx, float cy, float s)
+{
+    float d = 12.5f * unit() * s, W = (float)T.W, H = (float)T.H;
+
+    add(L, E_KEY, KEY_GAME_Y, cx / W, (cy - d) / H, s);
+    add(L, E_KEY, KEY_GAME_X, (cx - d) / W, cy / H, s);
+    add(L, E_KEY, KEY_GAME_B, (cx + d) / W, cy / H, s);
+    add(L, E_KEY, KEY_GAME_A, cx / W, (cy + d) / H, s);
+}
+
+/* PS1: слева крестовина, справа △○×□, сверху плечевые L1/L2 и R1/R2, внизу Select и Start. */
+static void psx_layout(Layout *L, int o)
+{
+    float W = (float)T.W, H = (float)T.H, u = unit(), s;
+
+    if (!o) {
+        float z0 = (float)(T.g.y + T.g.h), zh = H - z0, row, mid;
+        if (zh < H * 0.3f) {
+            z0 = H * 0.6f;
+            zh = H - z0;
+        }
+        row = (z0 + zh * 0.09f) / H;
+        mid = z0 + zh * 0.54f;
+        s = clampf(zh * 0.5f / (34 * u), 0.6f, 1.1f);
+        add(L, E_KEY, KEY_GAME_L2, 0.11f, row, 1);
+        add(L, E_KEY, KEY_GAME_L1, 0.30f, row, 1);
+        add(L, E_MENU, 0, 0.5f, row, 1);
+        add(L, E_KEY, KEY_GAME_R1, 0.70f, row, 1);
+        add(L, E_KEY, KEY_GAME_R2, 0.89f, row, 1);
+        add(L, E_STICK, 0, 0.25f, mid / H, s);
+        add_face(L, W * 0.75f, mid, s);
+        add(L, E_KEY, KEY_GAME_SELECT, 0.39f, (z0 + zh * 0.93f) / H, 1);
+        add(L, E_KEY, KEY_GAME_START, 0.61f, (z0 + zh * 0.93f) / H, 1);
+        add(L, E_SHOT, 0, 0.9f, (z0 + zh * 0.93f) / H, 0.85f);
+    } else {
+        float side = (float)T.g.x, lx;
+        if (side < W * 0.16f)
+            side = W * 0.24f;
+        lx = side / 2;
+        s = clampf(side * 0.8f / (34 * u), 0.6f, 1.1f);
+        add(L, E_KEY, KEY_GAME_L2, lx / W, 0.08f, 1);
+        add(L, E_KEY, KEY_GAME_L1, lx / W, 0.19f, 1);
+        add(L, E_KEY, KEY_GAME_R2, 1 - lx / W, 0.08f, 1);
+        add(L, E_KEY, KEY_GAME_R1, 1 - lx / W, 0.19f, 1);
+        add(L, E_MENU, 0, lx / W, 0.33f, 1);
+        add(L, E_SHOT, 0, 1 - lx / W, 0.33f, 0.85f);
+        add(L, E_STICK, 0, lx / W, 0.64f, s);
+        add_face(L, W - lx, H * 0.64f, s);
+        add(L, E_KEY, KEY_GAME_SELECT, lx / W, 0.93f, 1);
+        add(L, E_KEY, KEY_GAME_START, 1 - lx / W, 0.93f, 1);
+    }
+}
+
 /* Раскладка по умолчанию: в портрете — в полосе под игрой, в альбоме — по бокам. */
 static void default_layout(int o)
 {
@@ -135,6 +206,10 @@ static void default_layout(int o)
 
     L->n = 0;
     L->valid = 0;
+    if (T.console == CONSOLE_PSX) {
+        psx_layout(L, o);
+        return;
+    }
     if (!o) {
         float z0 = (float)(T.g.y + T.g.h), zh = H - z0, s;
         if (zh < H * 0.3f) {        /* места мало — кнопки поверх нижней части игры */
@@ -308,6 +383,51 @@ static void shape(Image *im, float x0, float y0, float w, float h, float rad, ui
         }
 }
 
+/* Отрезок толщиной t со сглаживанием — для △ и × на кнопках PS1. */
+static void seg(Image *im, float x0, float y0, float x1, float y1, float t, uint32_t c)
+{
+    float minx = (x0 < x1 ? x0 : x1) - t, maxx = (x0 > x1 ? x0 : x1) + t;
+    float miny = (y0 < y1 ? y0 : y1) - t, maxy = (y0 > y1 ? y0 : y1) + t;
+    float dx = x1 - x0, dy = y1 - y0, l2 = dx * dx + dy * dy;
+    int x, y;
+
+    for (y = (int)miny; y <= (int)maxy; y++)
+        for (x = (int)minx; x <= (int)maxx; x++) {
+            float px = (float)x + 0.5f - x0, py = (float)y + 0.5f - y0;
+            float k = l2 > 0 ? clampf((px * dx + py * dy) / l2, 0, 1) : 0;
+            float ex = px - k * dx, ey = py - k * dy;
+            put(im, x, y, c, t / 2 + 0.5f - sqrtf(ex * ex + ey * ey));
+        }
+}
+
+/* Значки DualShock своими цветами; на нажатой кнопке — тёмные, как остальные подписи. */
+static void psx_symbol(Image *im, int key, int w, int h, uint32_t c)
+{
+    float m = (float)(w < h ? w : h), cx = (float)w / 2, cy = (float)h / 2, r = m * 0.22f, t = m * 0.075f;
+    int normal = c == 0xFFFFFFFFu;
+
+    switch (key) {
+    case KEY_GAME_Y: {      /* △ — зелёный */
+        uint32_t k = normal ? 0xFF4FE0B0u : c;
+        float ty = cy - r * 1.05f, by = cy + r * 0.75f, hx = r * 1.1f;
+        seg(im, cx, ty, cx - hx, by, t, k);
+        seg(im, cx - hx, by, cx + hx, by, t, k);
+        seg(im, cx + hx, by, cx, ty, t, k);
+        break;
+    }
+    case KEY_GAME_B:        /* ○ — красный */
+        shape(im, cx - r, cy - r, r * 2, r * 2, m, 0, normal ? 0xFFFF6B78u : c, t);
+        break;
+    case KEY_GAME_A:        /* × — синий */
+        seg(im, cx - r, cy - r, cx + r, cy + r, t, normal ? 0xFF7FB8FFu : c);
+        seg(im, cx - r, cy + r, cx + r, cy - r, t, normal ? 0xFF7FB8FFu : c);
+        break;
+    case KEY_GAME_X:        /* □ — розовый */
+        shape(im, cx - r * 0.9f, cy - r * 0.9f, r * 1.8f, r * 1.8f, 1, 0, normal ? 0xFFFF8FD8u : c, t);
+        break;
+    }
+}
+
 static const char *const ic_gear[] = { "....#....", ".#.###.#.", "..#####..", ".##...##.", "###...###",
                                        ".##...##.", "..#####..", ".#.###.#.", "....#...." };
 static const char *const ic_plus[] = { "...#...", "...#...", "...#...", "#######", "...#...", "...#...", "...#..." };
@@ -394,6 +514,32 @@ static void draw_label(Image *im, int label, int w, int h, uint32_t c)
               bh * 1.2f, bh * 1.2f, bh, c, 0, 0);
         break;
     }
+    case KEY_GAME_A: case KEY_GAME_B: case KEY_GAME_X: case KEY_GAME_Y:
+        psx_symbol(im, label, w, h, c);
+        break;
+    case KEY_GAME_L1: text_center(im, "L1", cx, cy, m, c); break;
+    case KEY_GAME_L2: text_center(im, "L2", cx, cy, m, c); break;
+    case KEY_GAME_R1: text_center(im, "R1", cx, cy, m, c); break;
+    case KEY_GAME_R2: text_center(im, "R2", cx, cy, m, c); break;
+    case KEY_GAME_L3: text_center(im, "L3", cx, cy, m, c); break;
+    case KEY_GAME_R3: text_center(im, "R3", cx, cy, m, c); break;
+    case KEY_GAME_START: text_center(im, "START", cx, cy, m * 8 / 10, c); break;
+    case KEY_GAME_SELECT: text_center(im, "SELECT", cx, cy, m * 8 / 10, c); break;
+    case L_DPAD: {          /* крестовина: контур «плюса» и стрелки на концах */
+        float a = m * 0.17f, b = m * 0.47f;
+        shape(im, cx - a, cy - b, a * 2, b * 2, m * 0.05f, 0x50000000u, c, m * 0.025f);
+        shape(im, cx - b, cy - a, b * 2, a * 2, m * 0.05f, 0x50000000u, c, m * 0.025f);
+        shape(im, cx - a + m * 0.02f, cy - a + m * 0.02f, (a - m * 0.02f) * 2, (a - m * 0.02f) * 2, 0,
+              0x50000000u, 0, 0);
+        {
+            int sc = (int)(m / 60) > 1 ? (int)(m / 60) : 1;
+            icon(im, ic_arrow, 7, 0, (int)cx, (int)(cy - b * 0.68f), sc, c);
+            icon(im, ic_arrow, 7, 1, (int)(cx + b * 0.68f), (int)cy, sc, c);
+            icon(im, ic_arrow, 7, 2, (int)cx, (int)(cy + b * 0.68f), sc, c);
+            icon(im, ic_arrow, 7, 3, (int)(cx - b * 0.68f), (int)cy, sc, c);
+        }
+        break;
+    }
     case KEY_STAR:  text_center(im, "*", cx, cy, m, c); break;
     case KEY_POUND: text_center(im, "#", cx, cy, m, c); break;
     case KEY_CLEAR: text_center(im, "C", cx, cy, m, c); break;
@@ -463,7 +609,7 @@ static SDL_Texture *texture(int label, int w, int h, int style)
 {
     Tex *slot = NULL;
     Image im;
-    int i, round = label == L_STICK || label == L_KNOB;
+    int i, round = label == L_STICK || label == L_KNOB || is_face(label);
     float t = (float)(w < h ? w : h) * 0.045f + 1;
 
     if (w < 2 || h < 2)
@@ -488,7 +634,9 @@ static SDL_Texture *texture(int label, int w, int h, int style)
     memset(im.px, 0, (size_t)w * (size_t)h * 4);
     if (label == L_KNOB)
         shape(&im, 1, 1, (float)w - 2, (float)h - 2, (float)w, 0xB0FFFFFFu, 0xFFFFFFFFu, t);
-    else if (label == L_STICK && style == S_NORMAL)
+    else if (label == L_DPAD) {
+        draw_label(&im, label, w, h, 0xE0FFFFFFu);
+    } else if (label == L_STICK && style == S_NORMAL)
         shape(&im, 1, 1, (float)w - 2, (float)h - 2, (float)w, 0x50000000u, 0xD0FFFFFFu, t);
     else {
         uint32_t fill = style == S_PRESSED ? 0x90FFFFFFu : style == S_CHIP_ON ? 0xE07E6FD6u :
@@ -535,7 +683,7 @@ static void vibrate(void)
 
 static void press(int key)
 {
-    int k = key + 16;
+    int k = key + KEY_OFS;
 
     if (k < 0 || k >= KEY_SLOTS)
         return;
@@ -548,7 +696,7 @@ static void press(int key)
 
 static void release(int key)
 {
-    int k = key + 16;
+    int k = key + KEY_OFS;
 
     if (k < 0 || k >= KEY_SLOTS || T.keycount[k] == 0)
         return;
@@ -564,7 +712,7 @@ static void release_all(void)
     for (k = 0; k < KEY_SLOTS; k++)
         if (T.keycount[k]) {
             T.keycount[k] = 0;
-            T.emit(EV_KEY_UP, k - 16, 0, 0);
+            T.emit(EV_KEY_UP, k - KEY_OFS, 0, 0);
         }
     if (T.ptr_down) {
         T.emit(EV_POINTER_UP, 0, 0, 0);
@@ -840,7 +988,11 @@ static void stick_move(float x, float y)
     int want[4] = { 0, 0, 0, 0 }, d;
     static const int keys[4] = { KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT };
 
-    if (len > r) {                  /* палец ушёл дальше — центр едет за ним, как у L3 */
+    if (len > r && T.console == CONSOLE_PSX) {     /* крестовина на месте — палец лишь упирается */
+        dx = dx / len * r;
+        dy = dy / len * r;
+        len = r;
+    } else if (len > r) {           /* палец ушёл дальше — центр едет за ним, как у L3 */
         T.sox = x - dx / len * r;
         T.soy = y - dy / len * r;
         dx = x - T.sox;
@@ -897,6 +1049,9 @@ static void to_game(float x, float y, int *gx, int *gy)
 
 static const int addable[] = { KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_FIRE, KEY_SOFT_LEFT, KEY_SOFT_RIGHT,
                                '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', KEY_STAR, KEY_POUND, KEY_CLEAR };
+static const int addable_psx[] = { KEY_GAME_Y, KEY_GAME_B, KEY_GAME_A, KEY_GAME_X, KEY_GAME_L1, KEY_GAME_L2,
+                                   KEY_GAME_R1, KEY_GAME_R2, KEY_GAME_L3, KEY_GAME_R3, KEY_GAME_SELECT,
+                                   KEY_GAME_START, KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT };
 
 static int has_key(int type, int key)
 {
@@ -921,6 +1076,8 @@ static int editor_items(Item *it, int cap, SDL_Rect *panel)
         if (n < cap) { it[n].action = (a); it[n].arg = (g); it[n].label = (l); \
         it[n].r.x = x; it[n].r.y = y; it[n].r.w = it[n].r.h = b; n++; } x += b + gap; } while (0)
     for (i = 0; i < 7; i++) {
+        if (T.console && (row1[i][0] == A_WIDE || row1[i][0] == A_LATCH))
+            continue;           /* у приставки экран свой, а залипание стрелок ни к чему */
         PUT(row1[i][0], 0, row1[i][0] == A_WAY ? (T.four_way ? L_WAY4 : L_WAY8) :
                            row1[i][0] == A_WIDE ? (T.wide ? L_WIDE : L_TALL) :
                            row1[i][0] == A_LATCH ? (T.latch ? L_LATCH_ON : L_LATCH) : row1[i][2]);
@@ -937,12 +1094,17 @@ static int editor_items(Item *it, int cap, SDL_Rect *panel)
     }
     x = gap;
     y += b + gap * 2;
-    for (i = 0; i < (int)(sizeof(addable) / sizeof(addable[0])); i++)
-        if (!has_key(E_KEY, addable[i]))
-            PUT(A_ADD, addable[i], addable[i]);
+    {
+        const int *keys = T.console == CONSOLE_PSX ? addable_psx : addable;
+        int nk = T.console == CONSOLE_PSX ? (int)(sizeof(addable_psx) / sizeof(addable_psx[0]))
+                                          : (int)(sizeof(addable) / sizeof(addable[0]));
+        for (i = 0; i < nk; i++)
+            if (!has_key(E_KEY, keys[i]))
+                PUT(A_ADD, keys[i], keys[i]);
+    }
     if (!has_key(E_STICK, 0))
-        PUT(A_ADD, -100 - E_STICK, L_STICK);
-    if (!has_key(E_PAD, 0))
+        PUT(A_ADD, -100 - E_STICK, T.console == CONSOLE_PSX ? L_DPAD : L_STICK);
+    if (!has_key(E_PAD, 0) && T.console != CONSOLE_PSX)
         PUT(A_ADD, -100 - E_PAD, L_PAD);
     if (!has_key(E_SHOT, 0))
         PUT(A_ADD, -100 - E_SHOT, L_CAMERA);
@@ -1114,6 +1276,11 @@ static void down(Finger *f, float x, float y)
         T.stick_on = 1;
         T.sox = T.skx = x;
         T.soy = T.sky = y;
+        if (T.console == CONSOLE_PSX) {         /* крестовина: направление — от её центра */
+            SDL_Rect r = elem_rect(&cur()->e[stick_index()]);
+            T.sox = (float)r.x + (float)r.w / 2;
+            T.soy = (float)r.y + (float)r.h / 2;
+        }
         stick_move(x, y);
         return;
     }
@@ -1260,7 +1427,23 @@ void touch_draw(void)
         SDL_Rect r = elem_rect(e);
         if (!elem_visible(e))
             continue;
-        if (e->type == E_STICK) {
+        if (e->type == E_STICK && T.console == CONSOLE_PSX) {
+            /* крестовина: нажатые направления подсвечены */
+            float a = (float)r.w * 0.17f, b = (float)r.w * 0.47f, cx = r.x + r.w / 2.0f, cy = r.y + r.h / 2.0f;
+            int d;
+            blit(L_DPAD, r, S_NORMAL, T.edit ? 1 : T.opacity);
+            SDL_SetRenderDrawBlendMode(T.ren, SDL_BLENDMODE_BLEND);
+            SDL_SetRenderDrawColor(T.ren, 255, 255, 255, (Uint8)(clampf(T.opacity, 0.3f, 1) * 140));
+            for (d = 0; d < 4; d++)
+                if (T.sdir[d] && !T.edit) {
+                    SDL_Rect q;
+                    q.w = d < 2 ? (int)(a * 2) : (int)(b - a);
+                    q.h = d < 2 ? (int)(b - a) : (int)(a * 2);
+                    q.x = d < 2 ? (int)(cx - a) : d == 2 ? (int)(cx - b) : (int)(cx + a);
+                    q.y = d >= 2 ? (int)(cy - a) : d == 0 ? (int)(cy - b) : (int)(cy + a);
+                    SDL_RenderFillRect(T.ren, &q);
+                }
+        } else if (e->type == E_STICK) {
             if (T.stick_on && !T.edit) {
                 SDL_Rect b = r, k;
                 b.x = (int)(T.sox - (float)r.w / 2);
@@ -1280,7 +1463,7 @@ void touch_draw(void)
             }
         } else {
             int label = e->type == E_PAD ? L_PAD : e->type == E_MENU ? L_MENU : e->type == E_SHOT ? L_CAMERA : e->key;
-            int pressed = e->type == E_KEY && T.keycount[e->key + 16 < 0 ? 0 : e->key + 16] > 0;
+            int pressed = e->type == E_KEY && T.keycount[e->key + KEY_OFS < 0 ? 0 : e->key + KEY_OFS] > 0;
             if (e->type == E_PAD && T.panel)
                 pressed = 1;
             blit(label, r, pressed ? S_PRESSED : S_NORMAL, a);
@@ -1305,7 +1488,7 @@ void touch_draw(void)
         PItem it[64];
         int n = panel_items(it);
         for (i = 0; i < n; i++) {
-            int on = it[i].kind == PI_KEY ? T.keycount[it[i].val + 16] > 0 : i == T.kb_down;
+            int on = it[i].kind == PI_KEY ? T.keycount[it[i].val + KEY_OFS] > 0 : i == T.kb_down;
             blit(it[i].label, it[i].r, on ? S_PRESSED : S_NORMAL, T.opacity + 0.25f);
         }
     }
@@ -1388,6 +1571,18 @@ void touch_shutdown(void)
     if (T.haptic)
         SDL_HapticClose(T.haptic);
     memset(&T, 0, sizeof(T));
+}
+
+void touch_console(int mode)
+{
+    if (mode == T.console)
+        return;
+    release_all();
+    T.console = mode;
+    /* раскладки по умолчанию у приставки свои — пересоберём; сохранённые остаются */
+    T.lay[0].n = T.lay[0].valid ? T.lay[0].n : 0;
+    T.lay[1].n = T.lay[1].valid ? T.lay[1].n : 0;
+    T.dirty = 1;
 }
 
 void touch_profile(const char *game_id)

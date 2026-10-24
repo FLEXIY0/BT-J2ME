@@ -36,6 +36,7 @@ static void make_hand_cursor(void);
 static float         pad_ax, pad_ay; /* левый стик, -1..1 */
 static SDL_AudioDeviceID audio_dev;
 static AudioMixFn    audio_mix;
+static int           audio_ch = 1;  /* каналов у открытого устройства */
 static SDL_Rect      game_dst;      /* куда на окне ложится экран (без сенсорных кнопок) */
 
 /* Настройки ПК: полный экран, масштаб игр, звук, широкий экран по играм — <config>/bt-j2me/pc.cfg */
@@ -66,7 +67,10 @@ static uint32_t      typing_t;
 static int           osk_open;
 static int           osk_mouse;     /* кнопку мыши нажали на экранной клавиатуре — отпускание тоже её */
 static int           pads;          /* подключено геймпадов — подсказки рисуем под них */
-static int           console;       /* идёт картридж NES: своя раскладка и меню */
+static int           console;       /* идёт приставка (CONSOLE_NES, CONSOLE_PSX): своя раскладка и меню */
+static int           aspect_w, aspect_h; /* пропорции показа экрана игры, 0 — пиксели квадратные */
+static int           pad_start, pad_back; /* Start и View зажаты — у PS1 вместе они открывают меню */
+static int           trig[2];       /* курки LT/RT зажаты — у PS1 это L2/R2 */
 static void toast_draw(void);
 static int  typing_key(const SDL_Event *e);
 static int  osk_event(const SDL_Event *e);
@@ -109,6 +113,12 @@ void platform_display_size(int *w, int *h)
     SDL_GetRendererOutputSize(ren, w, h);
 }
 
+/* Ширина экрана игры «на телевизоре»: при заданных пропорциях — от высоты. */
+static int view_w(void)
+{
+    return aspect_w > 0 && aspect_h > 0 && screen.h > 0 ? screen.h * aspect_w / aspect_h : screen.w;
+}
+
 static void apply_scale(void)
 {
     int dw, dh, k;
@@ -131,12 +141,12 @@ static void apply_scale(void)
         game_dst.h = dh;
         return;
     }
-    k = dw / screen.w < dh / screen.h ? dw / screen.w : dh / screen.h;
-    fk = (float)dw / (float)screen.w < (float)dh / (float)screen.h ? (float)dw / (float)screen.w
-                                                                   : (float)dh / (float)screen.h;
+    k = dw / view_w() < dh / screen.h ? dw / view_w() : dh / screen.h;
+    fk = (float)dw / (float)view_w() < (float)dh / (float)screen.h ? (float)dw / (float)view_w()
+                                                                    : (float)dh / (float)screen.h;
     if (k >= 1 && (mode == SCALE_INTEGER || (mode == SCALE_AUTO && k * screen.h * 100 >= dh * 85)))
         fk = (float)k;
-    game_dst.w = (int)((float)screen.w * fk);
+    game_dst.w = (int)((float)view_w() * fk);
     game_dst.h = (int)((float)screen.h * fk);
     game_dst.x = (dw - game_dst.w) / 2;
     game_dst.y = (dh - game_dst.h) / 2;
@@ -252,7 +262,7 @@ static void filter_overlay(const SDL_Rect *dst)
 
     if (cursor_mode || !screen.px || (pc_filter != FL_CRT && !grid))
         return;
-    k = dst->h / screen.h < dst->w / screen.w ? dst->h / screen.h : dst->w / screen.w;
+    k = dst->h / screen.h < dst->w / view_w() ? dst->h / screen.h : dst->w / view_w();
     if (k < 2)
         return;
     if (k > (grid ? 3 : 4))
@@ -463,9 +473,19 @@ void platform_cursor_mode(int on)
     show_mouse(0);      /* в лаунчере рука рисуется сама; в игре появится, когда тронут мышь */
 }
 
-void platform_console_mode(int on)
+void platform_console_mode(int mode)
 {
-    console = on;
+    console = mode;
+    pad_start = pad_back = trig[0] = trig[1] = 0;
+    if (touch_on)
+        touch_console(mode);
+}
+
+void platform_set_aspect(int w, int h)
+{
+    aspect_w = w;
+    aspect_h = h;
+    apply_scale();
 }
 
 void platform_stick(float *x, float *y)
@@ -493,7 +513,7 @@ static void render(void)
         SDL_Rect dst;
         int w, h;
         platform_display_size(&w, &h);
-        touch_place(w, h, screen.w, screen.h, scale_mode, &dst);
+        touch_place(w, h, view_w(), screen.h, scale_mode, &dst);
         SDL_RenderCopy(ren, tex, NULL, &dst);
         filter_overlay(&dst);
         touch_draw();
@@ -642,9 +662,36 @@ void platform_vibrate(int ms)
 
 /* Раскладка: стрелки/WASD — джойстик, Enter/пробел — огонь, цифры и numpad — как на телефоне,
  * F1/F2 (или Q/E) — софт-клавиши. */
+/* Раскладка PS1: стрелки/WASD — крестовина; ромб справа I △, J □, K ×, L ○ (или Z ×, X ○, C □, V △);
+ * Q/E — L1/R1, 1/3 — L2/R2, F/G — L3/R3, Enter — Start, Shift/Tab/Backspace — Select. */
+static int psx_key(SDL_Keycode k)
+{
+    switch (k) {
+    case SDLK_UP:    case SDLK_w: return KEY_UP;
+    case SDLK_DOWN:  case SDLK_s: return KEY_DOWN;
+    case SDLK_LEFT:  case SDLK_a: return KEY_LEFT;
+    case SDLK_RIGHT: case SDLK_d: return KEY_RIGHT;
+    case SDLK_k: case SDLK_z: case SDLK_SPACE: return KEY_GAME_A;
+    case SDLK_l: case SDLK_x: return KEY_GAME_B;
+    case SDLK_j: case SDLK_c: return KEY_GAME_X;
+    case SDLK_i: case SDLK_v: return KEY_GAME_Y;
+    case SDLK_q: case SDLK_PAGEUP: return KEY_GAME_L1;
+    case SDLK_e: case SDLK_PAGEDOWN: return KEY_GAME_R1;
+    case SDLK_1: case SDLK_HOME: return KEY_GAME_L2;
+    case SDLK_3: case SDLK_END: return KEY_GAME_R2;
+    case SDLK_f: return KEY_GAME_L3;
+    case SDLK_g: return KEY_GAME_R3;
+    case SDLK_RETURN: case SDLK_KP_ENTER: return KEY_GAME_START;
+    case SDLK_RSHIFT: case SDLK_LSHIFT: case SDLK_TAB: case SDLK_BACKSPACE: return KEY_GAME_SELECT;
+    default: return 0;
+    }
+}
+
 /* Раскладка приставки: X/J/пробел — A, Z/K — B, Enter — Start, Shift/Tab/Backspace — Select. */
 static int console_key(SDL_Keycode k)
 {
+    if (console == CONSOLE_PSX)
+        return psx_key(k);
     switch (k) {
     case SDLK_UP:    case SDLK_w: return KEY_UP;
     case SDLK_DOWN:  case SDLK_s: return KEY_DOWN;
@@ -688,7 +735,21 @@ static int map_key(SDL_Keycode k)
  * кнопка Xbox — выход в меню. */
 static int map_button(Uint8 b)
 {
-    if (console)        /* у NES кнопки подписаны так же: A, B, Start, Select */
+    if (console == CONSOLE_PSX)     /* DualShock по месту: A — ×, B — ○, X — □, Y — △ */
+        switch (b) {
+        case SDL_CONTROLLER_BUTTON_A: return KEY_GAME_A;
+        case SDL_CONTROLLER_BUTTON_B: return KEY_GAME_B;
+        case SDL_CONTROLLER_BUTTON_X: return KEY_GAME_X;
+        case SDL_CONTROLLER_BUTTON_Y: return KEY_GAME_Y;
+        case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: return KEY_GAME_L1;
+        case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return KEY_GAME_R1;
+        case SDL_CONTROLLER_BUTTON_LEFTSTICK: return KEY_GAME_L3;
+        case SDL_CONTROLLER_BUTTON_RIGHTSTICK: return KEY_GAME_R3;
+        case SDL_CONTROLLER_BUTTON_START: return KEY_GAME_START;
+        case SDL_CONTROLLER_BUTTON_BACK: return KEY_GAME_SELECT;
+        default: break;
+        }
+    else if (console)   /* у NES кнопки подписаны так же: A, B, Start, Select */
         switch (b) {
         case SDL_CONTROLLER_BUTTON_A: case SDL_CONTROLLER_BUTTON_Y: return KEY_GAME_A;
         case SDL_CONTROLLER_BUTTON_B: case SDL_CONTROLLER_BUTTON_X: return KEY_GAME_B;
@@ -738,7 +799,7 @@ static void translate(const SDL_Event *e)
             pad_lb = down;
         else
             pad_rb = down;
-        if (!was && pad_lb && pad_rb) {     /* LB+RB вместе — спрятать или вернуть подсказки */
+        if (!was && pad_lb && pad_rb && console != CONSOLE_PSX) {  /* LB+RB — спрятать или вернуть подсказки */
             pc_hints = !pc_hints;
             pc_save();
             menu_dirty = 1;
@@ -847,6 +908,25 @@ static void translate(const SDL_Event *e)
                 if (tex)
                     render();
             }
+        } else if (console == CONSOLE_PSX && !cursor_mode &&
+                   (e->cbutton.button == SDL_CONTROLLER_BUTTON_BACK || e->cbutton.button == SDL_CONTROLLER_BUTTON_START)) {
+            /* у PS1 View — это Select, а меню паузы — View и Start вместе (или кнопка Xbox) */
+            int down = e->type == SDL_CONTROLLERBUTTONDOWN, other;
+            if (e->cbutton.button == SDL_CONTROLLER_BUTTON_BACK) {
+                pad_back = down;
+                other = pad_start;
+            } else {
+                pad_start = down;
+                other = pad_back;
+            }
+            if (down && other && !touch_on) {
+                push_pad(EV_KEY_UP, KEY_GAME_START);
+                push_pad(EV_KEY_UP, KEY_GAME_SELECT);
+                pad_start = pad_back = 0;
+                menu_show();
+            } else {
+                push_pad(down ? EV_KEY_DOWN : EV_KEY_UP, map_button(e->cbutton.button));
+            }
         } else if (e->cbutton.button == SDL_CONTROLLER_BUTTON_BACK && !touch_on && !cursor_mode) {
             if (e->type == SDL_CONTROLLERBUTTONDOWN)
                 menu_show();            /* View в игре — меню паузы (кнопку Xbox часто забирает Windows) */
@@ -868,6 +948,16 @@ static void translate(const SDL_Event *e)
             pad_ay = (float)e->caxis.value / 32767.0f;
         if (cursor_mode)
             break;      /* стик водит курсор лаунчера */
+        if (console == CONSOLE_PSX && (e->caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT ||
+                                       e->caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT)) {
+            /* курки — L2/R2: нажат за треть хода, отпущен — меньше шестой части */
+            int t = e->caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT;
+            int on = trig[t] ? e->caxis.value > 5000 : e->caxis.value > 11000;
+            if (on != trig[t])
+                push_pad(on ? EV_KEY_DOWN : EV_KEY_UP, t ? KEY_GAME_R2 : KEY_GAME_L2);
+            trig[t] = on;
+            break;
+        }
         if (e->caxis.axis == SDL_CONTROLLER_AXIS_LEFTX)
             stick_axis(e->caxis.value, 2, 3, KEY_LEFT, KEY_RIGHT);
         else if (e->caxis.axis == SDL_CONTROLLER_AXIS_LEFTY)
@@ -952,10 +1042,10 @@ static void SDLCALL audio_cb(void *ud, Uint8 *stream, int len)
     if (pc_mute || menu_open)           /* звук выключен в меню или игра на паузе */
         memset(stream, 0, (size_t)len);
     else
-        audio_mix((int16_t *)stream, len / 2);
+        audio_mix((int16_t *)stream, len / 2 / audio_ch);
 }
 
-int platform_audio_open(int rate, AudioMixFn mix)
+static int audio_open(int rate, int channels, AudioMixFn mix)
 {
     SDL_AudioSpec want, have;
 
@@ -968,10 +1058,11 @@ int platform_audio_open(int rate, AudioMixFn mix)
     SDL_zero(want);
     want.freq = rate;
     want.format = AUDIO_S16SYS;
-    want.channels = 1;
+    want.channels = (Uint8)channels;
     want.samples = 1024;    /* ~46 мс: без треска на слабых машинах, задержка незаметна */
     want.callback = audio_cb;
     audio_mix = mix;
+    audio_ch = channels;
     /* частоту подстраиваем под карту сами, формат и каналы пусть конвертирует SDL */
     audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
     if (!audio_dev) {
@@ -981,6 +1072,16 @@ int platform_audio_open(int rate, AudioMixFn mix)
     }
     SDL_PauseAudioDevice(audio_dev, 0);
     return have.freq;
+}
+
+int platform_audio_open(int rate, AudioMixFn mix)
+{
+    return audio_open(rate, 1, mix);
+}
+
+int platform_audio_open_stereo(int rate, AudioMixFn mix)
+{
+    return audio_open(rate, 2, mix);
 }
 
 void platform_audio_lock(int on)
@@ -1944,12 +2045,14 @@ static void toast_draw(void)
                                         "L3\tклавиатура", "LB+RB\tскрыть" };
     static const char *const nes[] = { "View\tменю", "A/Y\tA", "B/X\tB", "Start\tStart", "LB\tSelect",
                                        "LB+RB\tскрыть" };
+    static const char *const psx[] = { "View+Start\tменю", "A\tкрест ×", "B\tкруг ○", "X\tквадрат",
+                                       "Y\tтреугольник ▲", "View\tSelect" };
     enum { N = sizeof(j2me) / sizeof(j2me[0]) };
-    static Image cols[2], rows[2];
-    static SDL_Texture *tcols[2], *trows[2];
-    static int cws[2], chs[2], rws[2], rhs[2];
-    const char *const *pairs = console ? nes : j2me;
-    int m = console != 0, dw, dh, k, i, side;
+    static Image cols[3], rows[3];
+    static SDL_Texture *tcols[3], *trows[3];
+    static int cws[3], chs[3], rws[3], rhs[3];
+    const char *const *pairs = console == CONSOLE_PSX ? psx : console ? nes : j2me;
+    int m = console == CONSOLE_PSX ? 2 : console != 0, dw, dh, k, i, side;
     Image col = cols[m], row = rows[m];
     SDL_Texture *tcol = tcols[m], *trow = trows[m];
     int cw = cws[m], ch = chs[m], rw = rws[m], rh = rhs[m];

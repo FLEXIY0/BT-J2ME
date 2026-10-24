@@ -21,6 +21,8 @@ void touch_init(SDL_Renderer *ren, TouchEmit emit);
 void touch_shutdown(void);
 /* Профиль кнопок игры; NULL — кнопок нет (лаунчер), касания идут как указатель. */
 void touch_profile(const char *game_id);
+/* Режим приставки (CONSOLE_*): у PS1 свои кнопки — крестовина, △○×□, плечевые, Start/Select. */
+void touch_console(int mode);
 /* Куда рисовать экран игры gw×gh на выводе W×H: в портрете — сверху, под ним кнопки. */
 void touch_place(int W, int H, int gw, int gh, ScaleMode mode, SDL_Rect *dst);
 /* Событие SDL_FINGER*; 1 — обработано. */
