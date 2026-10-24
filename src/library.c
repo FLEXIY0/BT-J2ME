@@ -207,20 +207,21 @@ static int lone_bin(const char *dir, const char *name, char (*names)[256], int c
     return !psx_is_bios(path) && file_size(path) > (1L << 20);
 }
 
-int library_scan(Library *lib, const char *dir)
+#define SCAN_DEPTH 3     /* папка игр и ещё три уровня вложенных папок */
+
+/* Одна папка: игры из неё, потом — вложенные папки (кроме bios, covers и скрытых). */
+static void scan_dir(Library *lib, int *cap, const char *dir, int depth)
 {
     BtDir *d;
     const char *name;
-    int cap = 0, count = 0, ncap = 0, ntracks = 0, j;
-    char (*names)[256] = NULL, (*tracks)[256] = NULL;
+    int count = 0, ncap = 0, ntracks = 0, j;
+    char (*names)[256] = NULL, (*tracks)[256] = NULL, path[1400];
 
-    memset(lib, 0, sizeof(*lib));
-    copy_str(lib->dir, sizeof(lib->dir), dir);
     if (!(d = bt_dir_open(dir)))
-        return -1;
+        return;
     /* сначала все имена: чтобы скрыть дорожки .bin, надо знать, что называют .cue */
     while ((name = bt_dir_next(d)) != NULL) {
-        if (strlen(name) >= 256)
+        if (strlen(name) >= 256 || name[0] == '.')
             continue;
         if (count == ncap) {
             char (*nn)[256] = realloc(names, (size_t)(ncap = ncap ? ncap * 2 : 64) * 256);
@@ -233,11 +234,11 @@ int library_scan(Library *lib, const char *dir)
     bt_dir_close(d);
     for (j = 0; j < count; j++)
         if (has_ext(names[j], ".cue")) {
-            char path[1400], (*nt)[256] = realloc(tracks, (size_t)(ntracks + 16) * 256);
+            char (*nt)[256] = realloc(tracks, (size_t)(ntracks + 16) * 256);
             if (!nt)
                 break;
             tracks = nt;
-            snprintf(path, sizeof(path), "%s/%s", dir, names[j]);
+            snprintf(path, sizeof(path), "%.1000s/%.255s", dir, names[j]);
             ntracks += library_cue_files(path, tracks + ntracks, 16);
         }
     for (j = 0; j < count; j++) {
@@ -247,20 +248,27 @@ int library_scan(Library *lib, const char *dir)
 
         name = names[j];
         n = strlen(name);
+        snprintf(path, sizeof(path), "%.1000s/%.255s", dir, name);
+        if (bt_is_dir(path)) {
+            if (depth < SCAN_DEPTH && strcasecmp(name, "bios") && strcasecmp(name, "covers"))
+                scan_dir(lib, cap, path, depth + 1);
+            continue;
+        }
         nes = has_ext(name, ".nes");
         psx = has_ext(name, ".cue") || has_ext(name, ".iso") || has_ext(name, ".img") || has_ext(name, ".pbp") ||
               (has_ext(name, ".bin") && lone_bin(dir, name, names, count, tracks, ntracks));
-        if (n < 5 || (!has_ext(name, ".jar") && !nes && !psx) || n - 4 >= sizeof(g->base))
+        if (n < 5 || (!has_ext(name, ".jar") && !nes && !psx) || n - 4 >= sizeof(g->base) ||
+            strlen(path) >= sizeof(g->path))
             continue;
-        if (lib->count == cap) {
-            Game *ng = realloc(lib->games, (size_t)(cap = cap ? cap * 2 : 16) * sizeof(Game));
+        if (lib->count == *cap) {
+            Game *ng = realloc(lib->games, (size_t)(*cap = *cap ? *cap * 2 : 16) * sizeof(Game));
             if (!ng)
                 break;
             lib->games = ng;
         }
         g = &lib->games[lib->count++];
         memset(g, 0, sizeof(*g));
-        snprintf(g->path, sizeof(g->path), "%s/%s", dir, name);
+        snprintf(g->path, sizeof(g->path), "%.1023s", path);
         memcpy(g->base, name, n - 4);
         g->base[n - 4] = '\0';
         g->kind = nes ? GAME_NES : psx ? GAME_PSX : GAME_J2ME;
@@ -273,6 +281,17 @@ int library_scan(Library *lib, const char *dir)
     }
     free(names);
     free(tracks);
+}
+
+int library_scan(Library *lib, const char *dir)
+{
+    int cap = 0;
+
+    memset(lib, 0, sizeof(*lib));
+    copy_str(lib->dir, sizeof(lib->dir), dir);
+    if (!bt_is_dir(dir))
+        return -1;
+    scan_dir(lib, &cap, dir, 0);
     if (lib->count)
         qsort(lib->games, (size_t)lib->count, sizeof(Game), by_name);
     return 0;
@@ -429,8 +448,13 @@ void library_load_cover(const Library *lib, Game *g, int w, int h)
     char path[1400];
     Image src = { NULL, 0, 0 };
 
-    snprintf(path, sizeof(path), "%s/%s.png", lib->dir, g->base);
+    /* обложка рядом с игрой (в её папке), потом — в корне полки и в covers */
+    snprintf(path, sizeof(path), "%.*s.png", (int)(strlen(g->path) - 4), g->path);
     src = load_png_file(path);
+    if (!src.px) {
+        snprintf(path, sizeof(path), "%s/%s.png", lib->dir, g->base);
+        src = load_png_file(path);
+    }
     if (!src.px) {
         snprintf(path, sizeof(path), "%s/covers/%s.png", lib->dir, g->base);
         src = load_png_file(path);

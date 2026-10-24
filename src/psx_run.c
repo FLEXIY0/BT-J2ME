@@ -349,16 +349,31 @@ static int dir_has_bios(const char *dir)
     return found;
 }
 
-int psx_bios_dir(const char *games_dir, char *out, size_t cap)
+int psx_bios_dir(const char *game_dir, char *out, size_t cap)
 {
-    snprintf(out, cap, "%s/bios", games_dir);
-    if (dir_has_bios(out))
-        return 1;
-    if (dir_has_bios(games_dir)) {
-        snprintf(out, cap, "%s", games_dir);
-        return 1;
+    char dir[1024];
+    int level;
+
+    /* игра может лежать во вложенной папке полки — идём вверх до четырёх уровней */
+    snprintf(dir, sizeof(dir), "%s", game_dir);
+    for (level = 0; level < 4; level++) {
+        char *slash = strrchr(dir, '/');
+#ifdef _WIN32
+        if (strrchr(dir, '\\') > slash)
+            slash = strrchr(dir, '\\');
+#endif
+        snprintf(out, cap, "%.1000s/bios", dir);
+        if (dir_has_bios(out))
+            return 1;
+        if (dir_has_bios(dir)) {
+            snprintf(out, cap, "%s", dir);
+            return 1;
+        }
+        if (!slash || slash == dir)
+            break;
+        *slash = '\0';
     }
-    snprintf(out, cap, "%s/bios", games_dir);
+    snprintf(out, cap, "%s/bios", game_dir);
     return 0;
 }
 
@@ -399,7 +414,7 @@ static int write_file(const char *path, const void *data, size_t len)
 
 MidpResult psx_run(const char *path, const char *save_id, ScaleMode scale, char *err, size_t errlen)
 {
-    char games_dir[1024], st_path[1100];
+    char game_dir[1024], st_path[1100];
     const char *slash;
     struct retro_game_info info;
     struct retro_system_av_info av;
@@ -414,17 +429,17 @@ MidpResult psx_run(const char *path, const char *save_id, ScaleMode scale, char 
     P.scale = scale;
     P.fmt = RETRO_PIXEL_FORMAT_RGB565;
 
-    snprintf(games_dir, sizeof(games_dir), "%s", path);
-    slash = strrchr(games_dir, '/');
+    snprintf(game_dir, sizeof(game_dir), "%s", path);
+    slash = strrchr(game_dir, '/');
 #ifdef _WIN32
-    if (strrchr(games_dir, '\\') > slash)
-        slash = strrchr(games_dir, '\\');
+    if (strrchr(game_dir, '\\') > slash)
+        slash = strrchr(game_dir, '\\');
 #endif
     if (slash)
-        games_dir[slash - games_dir] = '\0';
+        game_dir[slash - game_dir] = '\0';
     else
-        snprintf(games_dir, sizeof(games_dir), ".");
-    have_bios = psx_bios_dir(games_dir, P.sys_dir, sizeof(P.sys_dir));
+        snprintf(game_dir, sizeof(game_dir), ".");
+    have_bios = psx_bios_dir(game_dir, P.sys_dir, sizeof(P.sys_dir));
     midp_save_dir(save_id, P.save_dir, sizeof(P.save_dir));
     bt_mkdirs(P.save_dir);
     snprintf(st_path, sizeof(st_path), "%s/state.sav", P.save_dir);

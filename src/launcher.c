@@ -1971,13 +1971,14 @@ static int copy_file(const char *src, const char *dst)
     return ok;
 }
 
-/* Диск PS1: .cue переносим вместе с дорожками, к .bin — его .cue, если лежит рядом;
- * BIOS (.bin ровно 512 КБ) — в папку bios. Образы большие, копирование занимает время. */
+/* Диск PS1 — в свою папку <папка игр>/<имя диска>: .cue вместе с дорожками, к .bin — его .cue,
+ * если лежит рядом; BIOS (.bin ровно 512 КБ) — в папку bios. Образы большие, копирование
+ * занимает время. Диск, что уже лежит внутри папки игр, не копируем — только встаём на него. */
 static int import_psx(const char *games_dir, const char *path, const char *name)
 {
-    char dst[1200], cue[1200], src_dir[1024], files[16][256], from[1400], to[1400];
+    char dst[1200], cue[1200], src_dir[1024], files[16][256], from[1400], to[1400], dir[1100];
     int k, i;
-    size_t n = strlen(path);
+    size_t n = strlen(path), gl = strlen(games_dir);
 
     if (psx_is_bios(path)) {
         snprintf(dst, sizeof(dst), "%s/bios", games_dir);
@@ -1988,6 +1989,10 @@ static int import_psx(const char *games_dir, const char *path, const char *name)
         BT_LOG("добавлен BIOS PlayStation: %s\n", dst);
         return 1;
     }
+    if (!strncmp(path, games_dir, gl) && (path[gl] == '/' || path[gl] == '\\')) {
+        snprintf(import_sel, sizeof(import_sel), "%.1000s", path);
+        return 1;
+    }
     snprintf(src_dir, sizeof(src_dir), "%.*s", (int)(name - path > 0 ? name - path - 1 : 0), path);
     if (!src_dir[0])
         snprintf(src_dir, sizeof(src_dir), ".");
@@ -1996,9 +2001,16 @@ static int import_psx(const char *games_dir, const char *path, const char *name)
         cue[0] = '\0';
     else if (ends_with(path, ".cue"))
         snprintf(cue, sizeof(cue), "%s", path);
-    bt_mkdirs(games_dir);
+    {
+        const char *stem = cue[0] ? cue : path, *p;
+        for (p = stem; *p; p++)
+            if (*p == '/' || *p == '\\')
+                stem = p + 1;
+        snprintf(dir, sizeof(dir), "%.800s/%.*s", games_dir, (int)(strlen(stem) - 4), stem);
+    }
+    bt_mkdirs(dir);
     if (!cue[0]) {                  /* один файл: .iso, .img, .pbp или .bin без .cue */
-        snprintf(dst, sizeof(dst), "%s/%s", games_dir, name);
+        snprintf(dst, sizeof(dst), "%.900s/%.255s", dir, name);
         if (!copy_file(path, dst))
             return 0;
         snprintf(import_sel, sizeof(import_sel), "%.1000s", dst);
@@ -2008,7 +2020,7 @@ static int import_psx(const char *games_dir, const char *path, const char *name)
     k = library_cue_files(cue, files, 16);
     for (i = 0; i < k; i++) {
         snprintf(from, sizeof(from), "%.1000s/%.255s", src_dir, files[i]);
-        snprintf(to, sizeof(to), "%.1000s/%.255s", games_dir, files[i]);
+        snprintf(to, sizeof(to), "%.1000s/%.255s", dir, files[i]);
         if (!copy_file(from, to)) {
             BT_LOG("не удалось добавить дорожку %s\n", from);
             return 0;
@@ -2018,7 +2030,7 @@ static int import_psx(const char *games_dir, const char *path, const char *name)
     for (i = 0; cue[i]; i++)
         if (cue[i] == '/' || cue[i] == '\\')
             name = cue + i + 1;
-    snprintf(dst, sizeof(dst), "%.900s/%.255s", games_dir, name);
+    snprintf(dst, sizeof(dst), "%.900s/%.255s", dir, name);
     if (!copy_file(cue, dst))
         return 0;
     snprintf(import_sel, sizeof(import_sel), "%.1000s", dst);
@@ -2207,6 +2219,13 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
     cfg->scale = SCALE_INTEGER;
     if (platform_init(cfg))
         return 1;
+    {
+        /* папка игр и bios в ней (BIOS PlayStation) появляются сами — остаётся класть игры;
+         * игры можно раскладывать и по своим папкам внутри: полка смотрит вглубь */
+        char bios[1100];
+        snprintf(bios, sizeof(bios), "%.1000s/bios", games_dir);
+        bt_mkdirs(bios);
+    }
     library_scan(&ui.lib, games_dir);
     if (!ui.lib.dir[0])
         snprintf(ui.lib.dir, sizeof(ui.lib.dir), "%s", games_dir);

@@ -198,6 +198,26 @@ int main(int argc, char **argv)
     }
     if (r == MIDP_ERROR)
         printf("ошибка: %s\n", err);
+    {
+        /* игра во вложенной папке полки, BIOS — в bios у корня: находится, поднимаясь вверх */
+        char root[1024], deep[1100], bios[1200], found[1200];
+        FILE *f;
+        snprintf(root, sizeof(root), "%s/полка", argv[2]);
+        snprintf(deep, sizeof(deep), "%s/PS1/Диск", root);
+        snprintf(bios, sizeof(bios), "%s/bios", root);
+        bt_mkdirs(deep);
+        bt_mkdirs(bios);
+        expect(!psx_bios_dir(deep, found, sizeof(found)), "без BIOS — встроенный HLE");
+        snprintf(bios, sizeof(bios), "%s/bios/scph1001.bin", root);
+        if ((f = bt_fopen(bios, "wb")) != NULL) {
+            fseek(f, 512 * 1024 - 1, SEEK_SET);
+            fputc(0, f);
+            fclose(f);
+        }
+        snprintf(bios, sizeof(bios), "%s/bios", root);
+        expect(psx_bios_dir(deep, found, sizeof(found)) && !strcmp(found, bios),
+               "BIOS из bios у корня полки для игры во вложенной папке");
+    }
     printf("PSX DONE fails=%d\n", fails);
     return fails != 0;
 }
