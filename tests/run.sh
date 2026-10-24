@@ -88,6 +88,26 @@ if [ "${BT_BACKEND:-sdl2}" = sdl2 ] && command -v timeout >/dev/null 2>&1; then
         XDG_DATA_HOME="$OUT/xdg" timeout 3 "$BIN" "$OUT/psx/shelf" --windowed
 fi
 
+# PlayStation 2: ядро ParaLLEl PS2 скачивается с buildbot.libretro.com (кэш — ~/.cache/bt-j2me),
+# BIOS — встроенный OpenPS2BIOS. Нет сети и нет ядра в кэше — тест пропускаем.
+if [ -x "$DIR/ps2_test" ]; then
+    CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/bt-j2me
+    mkdir -p "$OUT/ps2/data/bt-j2me/cores"
+    gunzip -c "$DIR/ps2/ps2test.iso.gz" >"$OUT/ps2/ps2test.iso"
+    [ -f "$CACHE/pcsx2_libretro.so" ] && cp "$CACHE/pcsx2_libretro.so" "$OUT/ps2/data/bt-j2me/cores/"
+    set +e
+    XDG_DATA_HOME="$OUT/ps2/data" timeout 300 "$DIR/ps2_test" "$OUT/ps2/ps2test.iso" "$OUT/ps2/run" >"$OUT/log" 2>&1
+    set -e
+    if grep -q "PS2 DONE fails=0" "$OUT/log"; then
+        echo "ok   PS2: ядро, OpenPS2BIOS, диск, быстрое сохранение"
+        mkdir -p "$CACHE" && cp "$OUT/ps2/data/bt-j2me/cores/pcsx2_libretro.so" "$CACHE/" 2>/dev/null || true
+    elif grep -q "нужна сеть" "$OUT/log"; then
+        echo "skip PS2: нет сети, чтобы скачать ядро"
+    else
+        echo "FAIL PS2"; cat "$OUT/log"; fails=$((fails + 1))
+    fi
+fi
+
 # Таблицы шрифтов должны быть отсортированы — по ним идёт двоичный поиск
 if command -v python3 >/dev/null 2>&1; then
     check "шрифты отсортированы" 0 "" python3 -c "

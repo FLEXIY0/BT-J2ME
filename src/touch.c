@@ -59,7 +59,7 @@ static struct {
     TouchEmit     emit;
     SDL_Haptic   *haptic;
     int           game;         /* в игре: показываем кнопки */
-    int           console;      /* CONSOLE_PSX — кнопки DualShock, стик становится крестовиной */
+    int           console;      /* PS1 и PS2 — кнопки DualShock, стик становится крестовиной */
     char          id[256];
     Layout        lay[2];       /* 0 — портрет, 1 — альбом */
     float         opacity;
@@ -206,7 +206,7 @@ static void default_layout(int o)
 
     L->n = 0;
     L->valid = 0;
-    if (T.console == CONSOLE_PSX) {
+    if (CONSOLE_DUALSHOCK(T.console)) {
         psx_layout(L, o);
         return;
     }
@@ -988,7 +988,7 @@ static void stick_move(float x, float y)
     int want[4] = { 0, 0, 0, 0 }, d;
     static const int keys[4] = { KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT };
 
-    if (len > r && T.console == CONSOLE_PSX) {     /* крестовина на месте — палец лишь упирается */
+    if (len > r && CONSOLE_DUALSHOCK(T.console)) {     /* крестовина на месте — палец лишь упирается */
         dx = dx / len * r;
         dy = dy / len * r;
         len = r;
@@ -1095,16 +1095,16 @@ static int editor_items(Item *it, int cap, SDL_Rect *panel)
     x = gap;
     y += b + gap * 2;
     {
-        const int *keys = T.console == CONSOLE_PSX ? addable_psx : addable;
-        int nk = T.console == CONSOLE_PSX ? (int)(sizeof(addable_psx) / sizeof(addable_psx[0]))
+        const int *keys = CONSOLE_DUALSHOCK(T.console) ? addable_psx : addable;
+        int nk = CONSOLE_DUALSHOCK(T.console) ? (int)(sizeof(addable_psx) / sizeof(addable_psx[0]))
                                           : (int)(sizeof(addable) / sizeof(addable[0]));
         for (i = 0; i < nk; i++)
             if (!has_key(E_KEY, keys[i]))
                 PUT(A_ADD, keys[i], keys[i]);
     }
     if (!has_key(E_STICK, 0))
-        PUT(A_ADD, -100 - E_STICK, T.console == CONSOLE_PSX ? L_DPAD : L_STICK);
-    if (!has_key(E_PAD, 0) && T.console != CONSOLE_PSX)
+        PUT(A_ADD, -100 - E_STICK, CONSOLE_DUALSHOCK(T.console) ? L_DPAD : L_STICK);
+    if (!has_key(E_PAD, 0) && !CONSOLE_DUALSHOCK(T.console))
         PUT(A_ADD, -100 - E_PAD, L_PAD);
     if (!has_key(E_SHOT, 0))
         PUT(A_ADD, -100 - E_SHOT, L_CAMERA);
@@ -1276,7 +1276,7 @@ static void down(Finger *f, float x, float y)
         T.stick_on = 1;
         T.sox = T.skx = x;
         T.soy = T.sky = y;
-        if (T.console == CONSOLE_PSX) {         /* крестовина: направление — от её центра */
+        if (CONSOLE_DUALSHOCK(T.console)) {         /* крестовина: направление — от её центра */
             SDL_Rect r = elem_rect(&cur()->e[stick_index()]);
             T.sox = (float)r.x + (float)r.w / 2;
             T.soy = (float)r.y + (float)r.h / 2;
@@ -1427,7 +1427,7 @@ void touch_draw(void)
         SDL_Rect r = elem_rect(e);
         if (!elem_visible(e))
             continue;
-        if (e->type == E_STICK && T.console == CONSOLE_PSX) {
+        if (e->type == E_STICK && CONSOLE_DUALSHOCK(T.console)) {
             /* крестовина: нажатые направления подсвечены */
             float a = (float)r.w * 0.17f, b = (float)r.w * 0.47f, cx = r.x + r.w / 2.0f, cy = r.y + r.h / 2.0f;
             int d;

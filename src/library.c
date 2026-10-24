@@ -3,6 +3,7 @@
 #include "jar.h"
 #include "manifest.h"
 #include "png.h"
+#include "disc.h"
 #include "psx.h"
 #include "compat.h"
 #include "util.h"
@@ -101,17 +102,10 @@ static void name_from_file(Game *g)
         o[-1] = '\0';
 }
 
-static long file_size(const char *path)
+static long long file_size(const char *path)
 {
-    FILE *f = bt_fopen(path, "rb");
-    long n = 0;
-
-    if (f) {
-        if (fseek(f, 0, SEEK_END) == 0)
-            n = ftell(f);
-        fclose(f);
-    }
-    return n;
+    long long n = bt_file_size(path);
+    return n > 0 ? n : 0;
 }
 
 /* Картридж NES: подзаголовок — NES. */
@@ -159,13 +153,13 @@ int library_cue_files(const char *cue_path, char (*out)[256], int max)
     return n;
 }
 
-/* Диск PS1: размер — всех дорожек .cue или самого образа, подзаголовок — PS1. */
+/* Диск PS1 или PS2: размер — всех дорожек .cue или самого образа, подзаголовок — PS1/PS2. */
 static void read_psx(Game *g, const char *dir)
 {
     size_t n = strlen(g->path);
 
     name_from_file(g);
-    copy_str(g->profile, sizeof(g->profile), "PS1");
+    copy_str(g->profile, sizeof(g->profile), g->kind == GAME_PS2 ? "PS2" : "PS1");
     if (n > 4 && strcasecmp(g->path + n - 4, ".cue") == 0) {
         char files[16][256], path[1400];
         int k = library_cue_files(g->path, files, 16), i;
@@ -256,6 +250,7 @@ static void scan_dir(Library *lib, int *cap, const char *dir, int depth)
         }
         nes = has_ext(name, ".nes");
         psx = has_ext(name, ".cue") || has_ext(name, ".iso") || has_ext(name, ".img") || has_ext(name, ".pbp") ||
+              has_ext(name, ".chd") || has_ext(name, ".cso") || has_ext(name, ".zso") ||
               (has_ext(name, ".bin") && lone_bin(dir, name, names, count, tracks, ntracks));
         if (n < 5 || (!has_ext(name, ".jar") && !nes && !psx) || n - 4 >= sizeof(g->base) ||
             strlen(path) >= sizeof(g->path))
@@ -271,7 +266,7 @@ static void scan_dir(Library *lib, int *cap, const char *dir, int depth)
         snprintf(g->path, sizeof(g->path), "%.1023s", path);
         memcpy(g->base, name, n - 4);
         g->base[n - 4] = '\0';
-        g->kind = nes ? GAME_NES : psx ? GAME_PSX : GAME_J2ME;
+        g->kind = nes ? GAME_NES : psx ? (disc_system(path) == DISC_PS2 ? GAME_PS2 : GAME_PSX) : GAME_J2ME;
         if (nes)
             read_nes(g);
         else if (psx)
@@ -340,11 +335,12 @@ static uint32_t hsv(unsigned h, unsigned s, unsigned v)   /* h 0..359, s/v 0..25
  * «логотип-овал» сверху и крупная пиксельная иконка игры (или диск, если иконки нет). */
 static int imax(int a, int b) { return a > b ? a : b; }
 
-/* Диск PS1: тёмная рабочая сторона с фиолетово-синим отливом, прозрачное кольцо у центра. */
-static void psx_disc(Image *d, int cx, int cy, int r, unsigned hue)
+/* Диск PS1: тёмная рабочая сторона с фиолетово-синим отливом, прозрачное кольцо у центра;
+ * у PS2 (ps2) — синяя, как у их DVD и CD. */
+static void psx_disc(Image *d, int cx, int cy, int r, unsigned hue, int ps2)
 {
     int hole = r / 7, ring = r * 2 / 5, x, y;
-    uint32_t tint = hsv((hue + 240) % 360, 90, 120);
+    uint32_t tint = ps2 ? hsv(220 + hue % 20, 200, 230) : hsv((hue + 240) % 360, 90, 120);
 
     for (y = -r; y <= r; y++)
         for (x = -r; x <= r; x++) {
@@ -361,7 +357,7 @@ static void psx_disc(Image *d, int cx, int cy, int r, unsigned hue)
                 a = atan2f((float)y, (float)x);
                 sheen = cosf(a * 2 + 0.6f);
                 sheen = sheen > 0.5f ? (sheen - 0.5f) * 2 : 0;
-                c = gfx_mix(0xFF101116u, tint, (unsigned)(60 + sheen * 150));
+                c = gfx_mix(ps2 ? 0xFF0B1E5Cu : 0xFF101116u, tint, (unsigned)(60 + sheen * 150));
             }
             d->px[py * d->w + px] = c;
         }
@@ -415,8 +411,8 @@ static Image make_cover(const Game *g, int w, int h)
         gfx_fill(&c, cx + cw / 8, cy + ch / 8, cw * 3 / 4, ch / 12, 0x50FFFFFFu);
         for (i = 0; i < 5; i++)
             gfx_fill(&c, cx + cw / 6 + i * (cw * 2 / 3) / 5, cy + ch * 3 / 4, imax(1, cw / 24), ch / 6, 0xFF6C6A74u);
-    } else if (g->kind == GAME_PSX) {
-        psx_disc(&c, w / 2, band + (h - band) / 2, w * 3 / 8, hue);
+    } else if (g->kind == GAME_PSX || g->kind == GAME_PS2) {
+        psx_disc(&c, w / 2, band + (h - band) / 2, w * 3 / 8, hue, g->kind == GAME_PS2);
     } else {
         gfx_disc(&c, w / 2, band + (h - band) / 2, w / 3, (float)(hs % 100) / 100.0f, 255);
     }

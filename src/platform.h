@@ -22,7 +22,9 @@ enum {
 };
 
 /* Режим приставки: у каждой своя раскладка кнопок и подсказки. */
-enum { CONSOLE_OFF, CONSOLE_NES, CONSOLE_PSX };
+enum { CONSOLE_OFF, CONSOLE_NES, CONSOLE_PSX, CONSOLE_PS2 };
+/* PS1 и PS2: один пульт DualShock — одни кнопки, подсказки и сенсорная раскладка. */
+#define CONSOLE_DUALSHOCK(m) ((m) == CONSOLE_PSX || (m) == CONSOLE_PS2)
 
 typedef enum {
     EV_NONE, EV_KEY_DOWN, EV_KEY_UP, EV_POINTER_DOWN, EV_POINTER_UP, EV_POINTER_MOVE,
@@ -85,12 +87,15 @@ int      platform_touch_wide(void);
 int      platform_latch(void);
 /* Размер экрана, выбранный для игры в меню паузы (ПК). 1 — выбран. */
 int      platform_game_size(const char *game_id, int *w, int *h);
-/* Идёт игра приставки (CONSOLE_NES, CONSOLE_PSX): кнопки KEY_GAME_*, в меню паузы — сохранение
+/* Идёт игра приставки (CONSOLE_NES, CONSOLE_PSX, CONSOLE_PS2): кнопки KEY_GAME_*, в меню паузы — сохранение
  * и сброс, у PS1 — свои сенсорные кнопки. CONSOLE_OFF — снова телефон. */
 void     platform_console_mode(int mode);
 /* Показывать экран с пропорциями w:h, каким бы ни был размер в пикселях (PS1 — всегда 4:3,
  * хоть 256×240, хоть 640×480). 0, 0 — пиксели квадратные. */
 void     platform_set_aspect(int w, int h);
+/* Аналоговые стики геймпада (0 — левый, 1 — правый), -1..1. У PS2 левый стик не жмёт
+ * крестовину, а идёт в игру как есть. */
+void     platform_analog(int stick, float *x, float *y);
 /* Язык системы для microedition.locale, например «ru-RU». */
 const char *platform_locale(void);
 /* Добавить игры системным выбором файлов (Android); по готовности придёт EV_REFRESH. */

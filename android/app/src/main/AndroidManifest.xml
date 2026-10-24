@@ -75,6 +75,15 @@
                 <data android:pathPattern=".*\\.pbp" />
                 <data android:pathPattern=".*\\..*\\.pbp" />
                 <data android:pathPattern=".*\\.PBP" />
+                <data android:pathPattern=".*\\.chd" />
+                <data android:pathPattern=".*\\..*\\.chd" />
+                <data android:pathPattern=".*\\.CHD" />
+                <data android:pathPattern=".*\\.cso" />
+                <data android:pathPattern=".*\\..*\\.cso" />
+                <data android:pathPattern=".*\\.CSO" />
+                <data android:pathPattern=".*\\.zso" />
+                <data android:pathPattern=".*\\..*\\.zso" />
+                <data android:pathPattern=".*\\.ZSO" />
             </intent-filter>
         </activity>
         <provider

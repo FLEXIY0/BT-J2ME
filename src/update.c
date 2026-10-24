@@ -23,6 +23,7 @@
 
 #define API_URL   "https://api.github.com/repos/FLEXIY0/BT-J2ME/releases/latest"
 #define DL_PREFIX "https://github.com/FLEXIY0/BT-J2ME/releases/download/"
+#define CORE_PREFIX "https://buildbot.libretro.com/nightly/"   /* ядра приставок (update_fetch) */
 
 /* Где есть готовый файл в выпуске: Windows x64, Android, Linux x86_64. */
 #if defined(_WIN64) || defined(__ANDROID__) || (defined(__linux__) && defined(__x86_64__))
@@ -108,7 +109,7 @@ static int url_ok(const char *u)
 {
     const char *p;
 
-    if (strncmp(u, DL_PREFIX, strlen(DL_PREFIX)))
+    if (strncmp(u, DL_PREFIX, strlen(DL_PREFIX)) && strncmp(u, CORE_PREFIX, strlen(CORE_PREFIX)))
         return 0;
     for (p = u; *p; p++)
         if (!isalnum((unsigned char)*p) && !strchr(":/._-~%+", *p))
@@ -123,6 +124,7 @@ typedef struct {
     char  *mem;
     size_t len;
     long   expect;
+    volatile int *kbytes;   /* update_fetch: сколько КБ уже скачано */
 } Sink;
 
 static int sink_put(Sink *s, const void *data, size_t n)
@@ -139,7 +141,9 @@ static int sink_put(Sink *s, const void *data, size_t n)
         s->mem[s->len + n] = '\0';
     }
     s->len += n;
-    if (s->expect > 0)
+    if (s->kbytes)
+        *s->kbytes = (int)(s->len >> 10);
+    else if (s->expect > 0)
         SDL_AtomicSet(&prog, (int)((long long)s->len * 100 / s->expect));
     return 1;
 }
@@ -482,6 +486,32 @@ static int SDLCALL cleanup_thread(void *u)
     return 0;
 }
 #endif
+
+int update_fetch(const char *url, const char *path, volatile int *kbytes)
+{
+    int ok = 0;
+
+    if (!url_ok(url))
+        return 0;
+#ifdef __ANDROID__
+    (void)kbytes;
+    act_call("download", "(Ljava/lang/String;Ljava/lang/String;)Z", url, path, &ok);
+#else
+    {
+        Sink s;
+        FILE *f = bt_fopen(path, "wb");
+        memset(&s, 0, sizeof(s));
+        s.f = f;
+        s.kbytes = kbytes;
+        ok = f && http_get(url, &s);
+        if (f && fclose(f) != 0)
+            ok = 0;
+        if (!ok)
+            bt_remove(path);
+    }
+#endif
+    return ok;
+}
 
 void update_cleanup(void)
 {

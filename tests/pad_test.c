@@ -191,6 +191,38 @@ int main(void)
     } else {
         printf("ok   pad PS1: View+Start -> меню паузы\n");
     }
+    /* PS2: стики аналоговые — крестовину не жмут, значение читается platform_analog */
+    SDL_JoystickSetVirtualButton(joy, SDL_CONTROLLER_BUTTON_START, 0);
+    SDL_JoystickSetVirtualButton(joy, SDL_CONTROLLER_BUTTON_BACK, 0);
+    {
+        Event ev;
+        int i, k;
+        for (k = 1; k >= 0; k--) {      /* B нажать и отпустить — меню паузы закрывается */
+            SDL_JoystickSetVirtualButton(joy, SDL_CONTROLLER_BUTTON_B, (Uint8)k);
+            for (i = 0; i < 20; i++) {
+                while (platform_poll(&ev))
+                    ;
+                SDL_Delay(2);
+            }
+        }
+    }
+    if (platform_paused())
+        printf("FAIL pad меню паузы не закрылось\n"), fails++;
+    platform_console_mode(CONSOLE_PS2);
+    SDL_JoystickSetVirtualAxis(joy, SDL_CONTROLLER_AXIS_LEFTX, 32767);
+    expect_none("PS2: левый стик не жмёт крестовину");
+    {
+        float x, y;
+        platform_analog(0, &x, &y);
+        if (x < 0.9f) {
+            printf("FAIL pad PS2: левый стик вправо: x=%.2f\n", x);
+            fails++;
+        } else {
+            printf("ok   pad PS2: левый стик аналоговый\n");
+        }
+    }
+    SDL_JoystickSetVirtualAxis(joy, SDL_CONTROLLER_AXIS_LEFTX, 0);
+    expect_none("PS2: стик в центре — без событий");
     platform_console_mode(CONSOLE_OFF);
 
     SDL_JoystickClose(joy);

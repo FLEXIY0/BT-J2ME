@@ -5,7 +5,7 @@
 любого размера и ориентации, управление с клавиатуры или Xbox-геймпада,
 без Java на компьютере. Пишется на C99, чтобы работать на
 старых и слабых машинах любой разрядности (i386, x86_64, ARM, MIPS).
-На той же полке живут картриджи NES / Денди и диски PlayStation.
+На той же полке живут картриджи NES / Денди и диски PlayStation и PlayStation 2.
 
 Концепт и дорожная карта: [docs/CONCEPT.md](docs/CONCEPT.md).
 
@@ -322,6 +322,34 @@ Wipeout (NTSC-U). Сборка — без оболочки с логотипом
 другого приложения передаёт только сам `.cue`, без дорожек. Такие диски добавляйте через
 «Добавить игры», выбрав `.cue` и `.bin` вместе.
 
+### Диски PlayStation 2 (ПК)
+
+Диски PS2 кладутся туда же, куда и всё остальное: `.iso`, `.cue`/`.bin`, `.chd`, `.cso`,
+`.zso`. PS1 и PS2 бывают в одинаковых `.iso` и `.bin` — полка смотрит на сам диск
+(`SYSTEM.CNF`: у PS2 там `BOOT2`) и рисует синий диск с подписью PS2.
+
+- **Ядро** — [ParaLLEl PS2](https://github.com/libretro/ps2) (PCSX2 для libretro). В
+  программу оно не вшито: весит ~13 МБ, поэтому при **первом** запуске игры PS2 полка
+  скачивает его (~4 МБ) с официальных ночных сборок
+  [buildbot.libretro.com](https://buildbot.libretro.com/nightly/) в папку данных
+  (`cores/`) и дальше берёт оттуда. Нужен интернет один раз.
+- **BIOS не нужен.** Вшит [OpenPS2BIOS](https://github.com/TamaribaEmu/OpenPS2BIOS) 0.3
+  (MIT) — свободная замена BIOS PS2, написанная заново, без кода Sony. Он ещё молодой:
+  до главного меню у авторов доходят 38 проверенных игр (God of War, GTA: San Andreas,
+  Final Fantasy X, Kingdom Hearts II, Shadow of the Colossus…), но про сам процесс игры,
+  звук и сохранения они ничего не обещают. Если игра с ним не идёт — положите свой BIOS
+  PS2 (файл ровно 4 МБ) в `games/bios`: он главнее встроенного.
+- **Картинка** — программный рендер ядра: без OpenGL и Vulkan, в родном разрешении PS2
+  (обычно 640×448, показ 4:3). Рисуют несколько потоков процессора. Нужен 64-битный ПК
+  с хорошим процессором; Windows и Linux x86-64.
+- **Пульт** — DualShock 2: кнопки как у PS1 (таблица выше), а **стики аналоговые** — идут
+  в игру как есть, не превращаясь в крестовину. В меню паузы — сохранить, загрузить и Reset.
+- **Карты памяти** — как на настоящей PS2, общие для всех игр: в папке данных,
+  `ps2/pcsx2/memcards`. «Сброс игры» на полке их не трогает.
+
+Пока не сделано: Android (ядро есть только для ARM64 и тяжёлое для телефонов — следующий
+шаг), вывод через видеокарту и повышенное разрешение.
+
 ### Сенсорное управление (Android, на ПК — `--touch`)
 
 Картинка игры в портрете стоит сверху, кнопки — под ней, в альбоме — по бокам:
@@ -398,11 +426,18 @@ Wipeout (NTSC-U). Сборка — без оболочки с логотипом
 сжатый образ, собранный `tools/build-openbios.sh` из исходников (зеркало
 [pcsx-redux/nugget](https://github.com/pcsx-redux/nugget), коммит e2264e0, `BOOT_MODE=fast`).
 
-Проверочный диск `tests/psx/psxtest.iso.gz` собран из `tests/psx/psxtest.c`
-(`tests/psx/build.sh`, нужны `mipsel-linux-gnu-gcc` и `genisoimage`).
+Встроенный BIOS PlayStation 2 — OpenPS2BIOS 0.3 (Tamariba Devs, MIT, см.
+[third_party/openps2bios/LICENSE](third_party/openps2bios/LICENSE)): `src/openps2bios_bin.h`,
+собирается `tools/build-openps2bios.sh` (clang с MIPS). Ядро PS2 — ParaLLEl PS2 (PCSX2,
+GPL-3) — в программу не входит: его скачивают с buildbot.libretro.com, где лежат его
+сборки и откуда ведут исходники.
+
+Проверочные диски: `tests/psx/psxtest.iso.gz` собран из `tests/psx/psxtest.c`
+(`tests/psx/build.sh`, нужны `mipsel-linux-gnu-gcc` и `genisoimage`), `tests/ps2/ps2test.iso.gz` —
+из `tests/ps2/ps2test.c` (`tests/ps2/build.sh`, clang с MIPS и `genisoimage`).
 
 ## Лицензия
 
-Ядро PlayStation распространяется под GPL-2, поэтому BT-J2ME как целое — тоже
-**GNU GPL v2** ([LICENSE](LICENSE)): исходники открыты, изменённые версии
+Ядро PlayStation (PCSX-ReARMed) распространяется под GPL версии 2 или новее, BT-J2ME как
+целое — **GNU GPL v2** ([LICENSE](LICENSE)): исходники открыты, изменённые версии
 распространяются на тех же условиях и тоже с исходниками.

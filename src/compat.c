@@ -73,6 +73,16 @@ int bt_is_dir(const char *path)
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
+long long bt_file_size(const char *path)
+{
+    wchar_t *w = wide(path);
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    int ok = w && GetFileAttributesExW(w, GetFileExInfoStandard, &fa);
+
+    free(w);
+    return ok ? (long long)fa.nFileSizeHigh << 32 | fa.nFileSizeLow : -1;
+}
+
 struct BtDir {
     HANDLE           h;
     WIN32_FIND_DATAW fd;
@@ -165,6 +175,13 @@ int bt_is_dir(const char *path)
     struct stat st;
 
     return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+long long bt_file_size(const char *path)
+{
+    struct stat st;
+
+    return stat(path, &st) == 0 ? (long long)st.st_size : -1;
 }
 
 BtDir *bt_dir_open(const char *path) { return (BtDir *)opendir(path); }

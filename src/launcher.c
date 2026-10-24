@@ -3,6 +3,8 @@
 #include "library.h"
 #include "midp.h"
 #include "nes.h"
+#include "disc.h"
+#include "ps2.h"
 #include "psx.h"
 #include "compat.h"
 #include "png.h"
@@ -1203,6 +1205,7 @@ static int run_game(Ui *ui, Game *g)
     platform_cursor_mode(0);        /* в игре стик снова крестовина, указатель — системный */
     r = g->kind == GAME_NES ? nes_run(g->path, g->base, mode, err, sizeof(err))
       : g->kind == GAME_PSX ? psx_run(g->path, g->base, mode, err, sizeof(err))
+      : g->kind == GAME_PS2 ? ps2_run(g->path, g->base, mode, err, sizeof(err))
                             : midp_run(g->path, g->base, mode, err, sizeof(err));
     platform_cursor_mode(1);
     ui->cur_press = 0;
@@ -2045,7 +2048,7 @@ int launcher_import(const char *games_dir, const char *path)
     FILE *f;
     int jar = ends_with(path, ".jar"), nes = ends_with(path, ".nes");
 
-    if (psx_is_image(path)) {
+    if (disc_is_image(path)) {
         for (p = path; *p; p++)
             if (*p == '/' || *p == '\\')
                 name = p + 1;

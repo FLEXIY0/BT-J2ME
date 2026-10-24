@@ -74,6 +74,7 @@ int platform_set_screen(int w, int h, ScaleMode mode)
     return screen.px ? 0 : -1;
 }
 void platform_set_aspect(int w, int h) { (void)h; aspect_w = w; }
+void platform_analog(int stick, float *x, float *y) { (void)stick; *x = *y = 0; }
 Image *platform_screen(void) { return &screen; }
 uint32_t platform_ticks_ms(void) { return now_ms; }
 void platform_sleep_ms(uint32_t ms) { now_ms += ms; }

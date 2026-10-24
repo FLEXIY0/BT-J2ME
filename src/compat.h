@@ -13,6 +13,7 @@ int         bt_mkdir(const char *path);
 int         bt_replace(const char *from, const char *to);   /* rename поверх существующего; 1 — успех */
 int         bt_remove(const char *path);                    /* 1 — успех */
 int         bt_is_dir(const char *path);
+long long   bt_file_size(const char *path);                 /* -1 — нет файла; образы DVD больше 4 ГБ */
 BtDir      *bt_dir_open(const char *path);
 const char *bt_dir_next(BtDir *d);                          /* имя в UTF-8 или NULL */
 void        bt_dir_close(BtDir *d);

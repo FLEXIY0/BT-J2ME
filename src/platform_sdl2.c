@@ -34,6 +34,7 @@ static uint32_t      mouse_seen;
 static void show_mouse(int on);
 static void make_hand_cursor(void);
 static float         pad_ax, pad_ay; /* левый стик, -1..1 */
+static float         pad_rx, pad_ry; /* правый стик */
 static SDL_AudioDeviceID audio_dev;
 static AudioMixFn    audio_mix;
 static int           audio_ch = 1;  /* каналов у открытого устройства */
@@ -67,7 +68,7 @@ static uint32_t      typing_t;
 static int           osk_open;
 static int           osk_mouse;     /* кнопку мыши нажали на экранной клавиатуре — отпускание тоже её */
 static int           pads;          /* подключено геймпадов — подсказки рисуем под них */
-static int           console;       /* идёт приставка (CONSOLE_NES, CONSOLE_PSX): своя раскладка и меню */
+static int           console;       /* идёт приставка (CONSOLE_NES, CONSOLE_PSX, CONSOLE_PS2): своя раскладка и меню */
 static int           aspect_w, aspect_h; /* пропорции показа экрана игры, 0 — пиксели квадратные */
 static int           pad_start, pad_back; /* Start и View зажаты — у PS1 вместе они открывают меню */
 static int           trig[2];       /* курки LT/RT зажаты — у PS1 это L2/R2 */
@@ -488,6 +489,12 @@ void platform_set_aspect(int w, int h)
     apply_scale();
 }
 
+void platform_analog(int stick, float *x, float *y)
+{
+    *x = stick ? pad_rx : pad_ax;
+    *y = stick ? pad_ry : pad_ay;
+}
+
 void platform_stick(float *x, float *y)
 {
     *x = pad_ax;
@@ -690,7 +697,7 @@ static int psx_key(SDL_Keycode k)
 /* Раскладка приставки: X/J/пробел — A, Z/K — B, Enter — Start, Shift/Tab/Backspace — Select. */
 static int console_key(SDL_Keycode k)
 {
-    if (console == CONSOLE_PSX)
+    if (CONSOLE_DUALSHOCK(console))
         return psx_key(k);
     switch (k) {
     case SDLK_UP:    case SDLK_w: return KEY_UP;
@@ -735,7 +742,7 @@ static int map_key(SDL_Keycode k)
  * кнопка Xbox — выход в меню. */
 static int map_button(Uint8 b)
 {
-    if (console == CONSOLE_PSX)     /* DualShock по месту: A — ×, B — ○, X — □, Y — △ */
+    if (CONSOLE_DUALSHOCK(console))     /* DualShock по месту: A — ×, B — ○, X — □, Y — △ */
         switch (b) {
         case SDL_CONTROLLER_BUTTON_A: return KEY_GAME_A;
         case SDL_CONTROLLER_BUTTON_B: return KEY_GAME_B;
@@ -799,7 +806,7 @@ static void translate(const SDL_Event *e)
             pad_lb = down;
         else
             pad_rb = down;
-        if (!was && pad_lb && pad_rb && console != CONSOLE_PSX) {  /* LB+RB — спрятать или вернуть подсказки */
+        if (!was && pad_lb && pad_rb && !CONSOLE_DUALSHOCK(console)) {  /* LB+RB — спрятать или вернуть подсказки */
             pc_hints = !pc_hints;
             pc_save();
             menu_dirty = 1;
@@ -908,7 +915,7 @@ static void translate(const SDL_Event *e)
                 if (tex)
                     render();
             }
-        } else if (console == CONSOLE_PSX && !cursor_mode &&
+        } else if (CONSOLE_DUALSHOCK(console) && !cursor_mode &&
                    (e->cbutton.button == SDL_CONTROLLER_BUTTON_BACK || e->cbutton.button == SDL_CONTROLLER_BUTTON_START)) {
             /* у PS1 View — это Select, а меню паузы — View и Start вместе (или кнопка Xbox) */
             int down = e->type == SDL_CONTROLLERBUTTONDOWN, other;
@@ -946,9 +953,13 @@ static void translate(const SDL_Event *e)
             pad_ax = (float)e->caxis.value / 32767.0f;
         else if (e->caxis.axis == SDL_CONTROLLER_AXIS_LEFTY)
             pad_ay = (float)e->caxis.value / 32767.0f;
+        else if (e->caxis.axis == SDL_CONTROLLER_AXIS_RIGHTX)
+            pad_rx = (float)e->caxis.value / 32767.0f;
+        else if (e->caxis.axis == SDL_CONTROLLER_AXIS_RIGHTY)
+            pad_ry = (float)e->caxis.value / 32767.0f;
         if (cursor_mode)
             break;      /* стик водит курсор лаунчера */
-        if (console == CONSOLE_PSX && (e->caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT ||
+        if (CONSOLE_DUALSHOCK(console) && (e->caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT ||
                                        e->caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT)) {
             /* курки — L2/R2: нажат за треть хода, отпущен — меньше шестой части */
             int t = e->caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT;
@@ -958,6 +969,8 @@ static void translate(const SDL_Event *e)
             trig[t] = on;
             break;
         }
+        if (console == CONSOLE_PS2)
+            break;      /* у PS2 стики аналоговые — их читает platform_analog */
         if (e->caxis.axis == SDL_CONTROLLER_AXIS_LEFTX)
             stick_axis(e->caxis.value, 2, 3, KEY_LEFT, KEY_RIGHT);
         else if (e->caxis.axis == SDL_CONTROLLER_AXIS_LEFTY)
@@ -2051,8 +2064,8 @@ static void toast_draw(void)
     static Image cols[3], rows[3];
     static SDL_Texture *tcols[3], *trows[3];
     static int cws[3], chs[3], rws[3], rhs[3];
-    const char *const *pairs = console == CONSOLE_PSX ? psx : console ? nes : j2me;
-    int m = console == CONSOLE_PSX ? 2 : console != 0, dw, dh, k, i, side;
+    const char *const *pairs = CONSOLE_DUALSHOCK(console) ? psx : console ? nes : j2me;
+    int m = CONSOLE_DUALSHOCK(console) ? 2 : console != 0, dw, dh, k, i, side;
     Image col = cols[m], row = rows[m];
     SDL_Texture *tcol = tcols[m], *trow = trows[m];
     int cw = cws[m], ch = chs[m], rw = rws[m], rh = rhs[m];

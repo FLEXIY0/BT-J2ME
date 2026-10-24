@@ -6,14 +6,14 @@
 
 #include "gfx.h"
 
-enum { GAME_J2ME, GAME_NES, GAME_PSX };
+enum { GAME_J2ME, GAME_NES, GAME_PSX, GAME_PS2 };
 
 typedef struct {
     char     path[1024];
     char     base[256];     /* имя файла без .jar/.nes/.cue — по нему ищется обложка */
-    int      kind;          /* GAME_J2ME, GAME_NES или GAME_PSX */
+    int      kind;          /* GAME_J2ME, GAME_NES, GAME_PSX или GAME_PS2 */
     char     name[128], vendor[128], version[32], profile[32];
-    long     size;
+    long long size;
     Image    icon;          /* иконка MIDlet из JAR, может быть пустой */
     Image    cover;         /* готовая обложка размера cover_w × cover_h */
     Image    cover_small;   /* она же для боковых боксов: уменьшена с усреднением, без «рваного» текста */

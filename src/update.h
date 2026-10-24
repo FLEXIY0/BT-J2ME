@@ -13,6 +13,9 @@ typedef enum {
     UPD_FAILED
 } UpdState;
 
+/* Скачать url в файл path, блокирующе (звать из своего потока); kbytes — сколько КБ уже
+ * пришло. Только с GitHub-выпусков проекта и сборок ядер libretro. 1 — успех. */
+int         update_fetch(const char *url, const char *path, volatile int *kbytes);
 /* Убрать хвосты прошлого обновления (bt-j2me.exe.old, update.apk) — в фоне, при каждом запуске,
  * даже если проверка обновлений выключена. */
 void        update_cleanup(void);

@@ -256,7 +256,8 @@ public class MainActivity extends SDLActivity {
 
     private static boolean isDisc(String lower) {
         return lower.endsWith(".cue") || lower.endsWith(".bin") || lower.endsWith(".iso") ||
-               lower.endsWith(".img") || lower.endsWith(".pbp");
+               lower.endsWith(".img") || lower.endsWith(".pbp") || lower.endsWith(".chd") ||
+               lower.endsWith(".cso") || lower.endsWith(".zso");
     }
 
     /* Дорожки, которые называет .cue (FILE "…"). */

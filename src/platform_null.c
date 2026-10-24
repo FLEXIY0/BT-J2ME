@@ -1,9 +1,11 @@
 /* Бэкенд без экрана: для серверов, CI и проверки JAR-ов. */
 #define _POSIX_C_SOURCE 199309L
 #include "platform.h"
+#include "ps2.h"
 #include "update.h"
 #include "util.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
 
@@ -91,6 +93,7 @@ int platform_open_url(const char *url) { (void)url; return 0; }
 int platform_touch_wide(void) { return 0; }
 void platform_console_mode(int mode) { (void)mode; }
 void platform_set_aspect(int w, int h) { (void)w; (void)h; }
+void platform_analog(int stick, float *x, float *y) { (void)stick; *x = *y = 0; }
 int platform_game_size(const char *id, int *w, int *h) { (void)id; (void)w; (void)h; return 0; }
 const char *platform_locale(void)
 {
@@ -100,6 +103,19 @@ const char *platform_locale(void)
 
 /* без графики обновлений нет */
 void update_cleanup(void) {}
+
+/* без SDL нечем подгрузить ядро PS2 */
+MidpResult ps2_run(const char *path, const char *save_id, ScaleMode scale, char *err, size_t errlen)
+{
+    (void)path; (void)save_id; (void)scale;
+    snprintf(err, errlen, "PlayStation 2 недоступна в сборке без графики");
+    return MIDP_ERROR;
+}
+int update_fetch(const char *url, const char *path, volatile int *kbytes)
+{
+    (void)url; (void)path; (void)kbytes;
+    return 0;
+}
 void update_check(void) {}
 UpdState update_state(void) { return UPD_IDLE; }
 const char *update_version(void) { return ""; }
