@@ -782,6 +782,13 @@ static void draw_settings(Ui *ui)
         gfx_text(s, &font_small, x + 8 + 16 * ui->s, y + (row_h - 2 - font_small.h) / 2, names[i], ui->th->text, 1);
         draw_switch(ui, x + w - 8 - 18 * ui->s, y + (row_h - 2 - 9 * ui->s) / 2, on);
     }
+    /* номер сборки — понять, какая версия стоит и пришло ли обновление */
+    {
+        const char *v = "Версия " BT_VERSION;
+        int y = y0 + rows * row_h + 6;
+        if (y + font_small.h < ui->H - ui->tab_h)
+            gfx_text(s, &font_small, (ui->W - gfx_text_width(&font_small, v, 1)) / 2, y, v, ui->th->sub, 1);
+    }
 }
 
 static void draw_tabs(Ui *ui)
