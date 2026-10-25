@@ -13,5 +13,6 @@ dist/
 /android/app/jni/SDL
 /android/local.properties
 /tests/psx_test
+/tests/boxart_test
 /tests/*.exe
 /tests/ps2_test
