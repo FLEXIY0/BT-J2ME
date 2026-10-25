@@ -1,30 +1,24 @@
-/* Носители для полки в пиксельном стиле: плоские, одного размера, с тёмным контуром и
- * «толщиной» снизу. Рисуются в маленьком разрешении (MEDIA_PIXEL экранных точек на пиксель),
- * обложка уменьшается до него же — крупный пиксель у всего носителя одинаковый. */
+/* Носители для полки в духе пакетов «3D Boxes»: коробки PS1 и PS2 с корешком слева, картридж
+ * NES (фото Evan-Amos, public domain) с бумажной наклейкой-обложкой, карта microSD для J2ME.
+ * Рисуем вдвое крупнее и уменьшаем с усреднением: так ровные края и мелкий текст корешка.
+ * Сначала собираются плоские лицевая сторона и корешок, потом натягиваются на трапеции —
+ * дальний край короче, как в перспективе. Сверху общий свет: верх светлее, низ темнее. */
 #include "media.h"
 #include "library.h"
+#include "png.h"
+#include "ttf.h"
+#include "shelf_assets.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define OUTLINE 0xFF14131Au
+#define SS 2
 
-float media_aspect(int kind)
-{
-    (void)kind;
-    return 0.8f;        /* все носители одного размера */
-}
-
-float media_front_aspect(int kind)
-{
-    switch (kind) {
-    case GAME_NES:  return 1.25f;   /* наклейка картриджа */
-    case GAME_PSX:  return 0.92f;
-    case GAME_PS2:  return 0.82f;
-    default:        return 0.85f;   /* наклейка карты памяти */
-    }
-}
+/* Где на фото наклейка: доли ширины и высоты картинки (x0, y0, x1, y1). */
+static const float NES_LABEL[4] = { 0.3888f, 0.0089f, 0.9363f, 0.7195f };
+static const float SD_LABEL[4] = { 0.1893f, 0.3075f, 0.8797f, 0.9210f };
 
 static int imin(int a, int b) { return a < b ? a : b; }
 static int imax(int a, int b) { return a > b ? a : b; }
@@ -34,207 +28,333 @@ static uint32_t shade(uint32_t c, int k)    /* k: -255 (чёрный) .. 255 (б
     return k < 0 ? gfx_mix(c, 0xFF000000u, (unsigned)-k) : gfx_mix(c, 0xFFFFFFFFu, (unsigned)k);
 }
 
-static int opaque(const Image *d, int x, int y)
+float media_front_aspect(int kind)
 {
-    return x >= 0 && y >= 0 && x < d->w && y < d->h && (d->px[y * d->w + x] >> 24);
-}
-
-/* Прямоугольник со срезанными на r пикселей углами — пиксельное «скругление». */
-static void rbox(Image *d, int x, int y, int w, int h, int r, uint32_t c)
-{
-    int j;
-
-    for (j = 0; j < h; j++) {
-        int in = j < r ? r - j : j >= h - r ? j - (h - r - 1) : 0;
-        gfx_fill(d, x + in, y + j, w - 2 * in, 1, c);
+    switch (kind) {
+    case GAME_PS2: return 0.70f;
+    case GAME_PSX: return 0.98f;
+    case GAME_NES: return 0.69f;    /* наклейка картриджа */
+    default:       return 0.83f;    /* наклейка карты памяти */
     }
 }
 
-/* Обложка, кадрированная по центру под w × h (top — откуда брать по высоте: 0..1). */
-static void cover_fill(Image *d, const Image *src, int x, int y, int w, int h, float top)
+float media_aspect(int kind)
 {
-    int cw = src->w, ch = src->w * h / imax(1, w), x0, y0, i, j;
-    Image crop, sc;
+    switch (kind) {
+    case GAME_PS2: return 0.79f;
+    case GAME_PSX: return 1.15f;
+    case GAME_NES: return 1.01f;
+    default:       return 0.74f;
+    }
+}
+
+static Image asset(const unsigned char *png, size_t len)
+{
+    Image im = { NULL, 0, 0 };
+
+    im.px = png_decode(png, len, &im.w, &im.h);
+    if (!im.px)
+        im.w = im.h = 0;
+    return im;
+}
+
+/* Обложка, кадрированная под w × h (top — откуда брать по высоте: 0..1), в (x, y);
+ * r > 0 — со скруглёнными углами. */
+static void cover_fill(Image *d, const Image *src, int x, int y, int w, int h, float top, float r)
+{
+    int cw = src->w, ch = (int)((float)src->w * (float)h / (float)imax(1, w)), i, j;
+    Image crop, sc, mask;
 
     if (w < 1 || h < 1)
         return;
     if (ch > src->h) {
         ch = src->h;
-        cw = src->h * w / imax(1, h);
+        cw = (int)((float)src->h * (float)w / (float)imax(1, h));
     }
-    x0 = (src->w - cw) / 2;
-    y0 = (int)((float)(src->h - ch) * top);
-    crop = image_new(cw, ch);
-    if (!crop.px)
-        return;
-    for (j = 0; j < ch; j++)
-        memcpy(crop.px + (size_t)j * cw, src->px + (size_t)(y0 + j) * src->w + x0, (size_t)cw * 4);
+    crop = image_crop(src, (src->w - cw) / 2, (int)((float)(src->h - ch) * top), cw, ch);
     sc = image_resize(&crop, w, h);
     image_free(&crop);
-    for (j = 0; sc.px && j < h; j++)
-        for (i = 0; i < w; i++)
-            if (x + i >= 0 && y + j >= 0 && x + i < d->w && y + j < d->h)
-                d->px[(y + j) * d->w + x + i] = sc.px[j * w + i] | 0xFF000000u;
+    mask = image_new(w, h);
+    if (sc.px && mask.px) {
+        memset(mask.px, 0, (size_t)w * (size_t)h * 4);
+        gfx_rrect_aa(&mask, 0, 0, (float)w, (float)h, r > 0 ? r : 0.01f, 0xFFFFFFFFu);
+        for (j = 0; j < h; j++)
+            for (i = 0; i < w; i++) {
+                int px = x + i, py = y + j;
+                if (px >= 0 && py >= 0 && px < d->w && py < d->h)
+                    gfx_over(&d->px[py * d->w + px], sc.px[j * w + i] & 0xFFFFFFu, mask.px[j * w + i] >> 24);
+            }
+    }
     image_free(&sc);
+    image_free(&mask);
 }
 
-/* Пиксельная картинка из строк: буква — цвет из таблицы pal ("r" → pal['r']). */
-static void sprite(Image *d, int x, int y, const char *const *rows, int n, const uint32_t *pal)
+/* Мягкая косая полоса блика по прямоугольнику (x, y, w, h). */
+static void gloss(Image *d, int x, int y, int w, int h, unsigned a)
 {
     int i, j;
+    float soft = (float)h / 30;
 
-    for (j = 0; j < n; j++)
-        for (i = 0; rows[j][i]; i++)
-            if (rows[j][i] != '.')
-                gfx_fill(d, x + i, y + j, 1, 1, pal[(unsigned char)rows[j][i]]);
+    for (j = 0; j < h; j++) {
+        float t = (float)j / (float)h;
+        float xl = ((0.55f - 0.43f * t)) * (float)w, xr = ((0.78f - 0.43f * t)) * (float)w;
+        for (i = 0; i < w; i++) {
+            float fi = (float)i, k = fminf(fi - xl, xr - fi) / soft;
+            int px = x + i, py = y + j;
+            if (k <= 0 || px < 0 || py < 0 || px >= d->w || py >= d->h || !(d->px[py * d->w + px] >> 24))
+                continue;
+            k = k > 1 ? 1 : k;
+            d->px[py * d->w + px] = (d->px[py * d->w + px] & 0xFF000000u) |
+                                    (gfx_mix(d->px[py * d->w + px], 0xFFFFFFu, (unsigned)(k * (float)a)) & 0xFFFFFFu);
+        }
+    }
 }
 
-/* Старый логотип PlayStation 5×5: красная «P» стоит, «S» из трёх цветов лежит. */
-static void psx_logo(Image *d, int x, int y)
+/* Текст сверху вниз (повёрнут по часовой стрелке) с верхней точки; возвращает длину. */
+static int vtext(Image *d, int x, int y, int font, int px, const char *t, uint32_t c, int max_len)
 {
-    static const char *const rows[] = { ".rr..", ".r.r.", ".rr..", "yrggb", ".r.bb" };
-    uint32_t pal[128] = { 0 };
+    Image im = ttf_render(font, px, t, c);
+    int i, j, len = im.w;
 
-    pal['r'] = 0xFFE8303Au;
-    pal['y'] = 0xFFF2C21Bu;
-    pal['g'] = 0xFF2FB36Bu;
-    pal['b'] = 0xFF3A7FE0u;
-    sprite(d, x, y, rows, 5, pal);
+    if (!im.px || len > max_len) {
+        image_free(&im);
+        return 0;
+    }
+    for (j = 0; j < im.h; j++)
+        for (i = 0; i < im.w; i++) {
+            uint32_t p = im.px[j * im.w + i];
+            int dx = x + im.h - 1 - j, dy = y + i;
+            if ((p >> 24) && dx >= 0 && dy >= 0 && dx < d->w && dy < d->h)
+                gfx_over(&d->px[dy * d->w + dx], p & 0xFFFFFFu, p >> 24);
+        }
+    image_free(&im);
+    return len;
 }
 
-/* Логотип PS2 — тонкие буквы, как на коробках. */
-static void ps2_logo(Image *d, int x, int y, uint32_t c)
+/* Старый логотип PlayStation, упрощённо: красная «P» стоит, «S» из трёх цветов лежит. */
+static void psx_logo(Image *d, float x, float y, float s)
 {
-    static const char *const rows[] = {
-        "ccc.ccc.ccc", "c.c.c.....c", "ccc.ccc.ccc", "c.....c.c..", "c...ccc.ccc" };
-    uint32_t pal[128] = { 0 };
+    float a[] = { x, y + s * .62f, x + s * .28f, y + s * .55f, x + s * .28f, y + s * .7f, x, y + s * .78f };
+    float b[] = { x + s * .47f, y + s * .55f, x + s, y + s * .62f, x + s, y + s * .74f, x + s * .47f, y + s * .68f };
+    float c[] = { x + s * .47f, y + s * .8f, x + s, y + s * .78f, x + s * .8f, y + s, x + s * .3f, y + s };
 
-    pal['c'] = c;
-    sprite(d, x, y, rows, 5, pal);
+    gfx_rrect_aa(d, x + s * .3f, y, s * .15f, s * .75f, 0.5f, 0xFFE8303Au);
+    gfx_rrect_aa(d, x + s * .3f, y, s * .42f, s * .4f, s * .2f, 0xFFE8303Au);
+    gfx_rrect_aa(d, x + s * .42f, y + s * .1f, s * .18f, s * .2f, s * .09f, 0xFF0A0A0Cu);
+    gfx_poly(d, a, 4, 0xFFF2C21Bu);
+    gfx_poly(d, b, 4, 0xFF2FB36Bu);
+    gfx_poly(d, c, 4, 0xFF3A7FE0u);
 }
 
-/* Контур и толщина: края фигуры — тёмные, нижние ряды — темнее (носитель «стоит»). */
-static void finish(Image *d, int depth)
+/* Развёртку — на столбцы x0..x1: левый край от t0 до b0, правый от t1 до b1 (перспектива:
+ * дальний край короче, и картинка к нему сжимается); dark — притемнение (торец в тени). */
+static void warp(Image *d, const Image *tex, int x0, int x1, float t0, float b0, float t1, float b1, int dark)
 {
-    Image c = image_new(d->w, d->h);
+    float h0 = b0 - t0, h1 = b1 - t1;
     int x, y;
 
-    if (!c.px)
-        return;
-    memcpy(c.px, d->px, (size_t)d->w * d->h * 4);
-    for (y = 0; y < d->h; y++)
-        for (x = 0; x < d->w; x++) {
-            uint32_t *p = &d->px[y * d->w + x];
-            if (!opaque(&c, x, y))
+    for (x = x0; x < x1; x++) {
+        float t = ((float)(x - x0) + 0.5f) / (float)(x1 - x0);
+        float u = t * h1 / ((1 - t) * h0 + t * h1), top = t0 + (t1 - t0) * t, bot = b0 + (b1 - b0) * t;
+        int sx = imin(tex->w - 1, (int)(u * (float)tex->w));
+        if (x < 0 || x >= d->w)
+            continue;
+        for (y = (int)top; y <= (int)bot && y < d->h; y++) {
+            float v = ((float)y + 0.5f - top) / (bot - top), cov = 1;
+            uint32_t p;
+            unsigned a;
+            if (y < 0 || v < 0 || v >= 1)
                 continue;
-            if (!opaque(&c, x - 1, y) || !opaque(&c, x + 1, y) || !opaque(&c, x, y - 1) || !opaque(&c, x, y + 1))
-                *p = OUTLINE;
-            else if (!opaque(&c, x, y + depth + 1))
-                *p = shade(*p, -110);
-            else if (!opaque(&c, x, y - 2))
-                *p = shade(*p, 60);         /* светлая кромка сверху */
+            if ((float)y < top)
+                cov = (float)y + 1 - top;
+            if ((float)y + 1 > bot)
+                cov = bot - (float)y;
+            p = tex->px[imin(tex->h - 1, (int)(v * (float)tex->h)) * tex->w + sx];
+            a = (unsigned)((float)(p >> 24) * (cov < 0 ? 0 : cov));
+            if (dark)
+                p = gfx_mix(p, 0xFF000000u, (unsigned)dark);
+            if (a)
+                d->px[y * d->w + x] = (p & 0xFFFFFFu) | a << 24;
         }
-    image_free(&c);
+    }
 }
 
-/* Коробка компакт-диска PS1: чёрный корешок слева с логотипом, обложка под прозрачной крышкой. */
-static void draw_ps1(const Media *m, Image *d)
+/* Коробка PS1/PS2: лицо — обложка под плёнкой, корешок — логотип, приставка и название. */
+static void build_case(const Media *m, int Hs, Image *face, Image *spine)
 {
-    int w = d->w, h = d->h - 2, sw = imax(4, w * 15 / 100);
+    int ps2 = m->kind == GAME_PS2, fw = (int)((float)Hs * (ps2 ? 0.70f : 0.98f)), sw, b, y, n;
+    char title[64];
 
-    rbox(d, 0, 0, w, h, 1, 0xFF2A2B33u);
-    gfx_fill(d, 1, 1, sw, h - 2, 0xFF0B0B0Eu);
-    if (sw >= 6)
-        psx_logo(d, (sw - 5) / 2 + 1, 2);
-    gfx_fill(d, sw / 2, 9, 1, h - 13, 0xFF9A9CA6u);      /* надпись на корешке — светлая черта */
+    sw = (int)((float)fw * (ps2 ? 0.13f : 0.17f));
+    *face = image_new(fw, Hs);
+    *spine = image_new(sw, Hs);
+    if (!face->px || !spine->px)
+        return;
+    b = imax(2, Hs / 90);
+    gfx_fill(face, 0, 0, fw, Hs, ps2 ? 0xFF10121Au : 0xFF24262Eu);
     if (m->front)
-        cover_fill(d, m->front, sw + 2, 2, w - sw - 4, h - 4, 0.5f);
-    gfx_fill(d, sw + 1, 1, 1, h - 2, 0xFFC9CCD6u);       /* петля крышки */
-    gfx_fill(d, sw + 2, 1, w - sw - 3, 1, 0xFFB4B8C4u);
+        cover_fill(face, m->front, b, b, fw - 2 * b, Hs - 2 * b, 0.5f, 0);
+    if (!ps2) {     /* прозрачная крышка коробки компакт-диска: светлая рамка и петля */
+        int k;
+        for (k = 0; k < b; k++) {
+            gfx_fill(face, k, k, fw - 2 * k, 1, 0xC8D2D6E2u);
+            gfx_fill(face, k, Hs - 1 - k, fw - 2 * k, 1, 0xC8D2D6E2u);
+            gfx_fill(face, k, k, 1, Hs - 2 * k, 0xC8D2D6E2u);
+            gfx_fill(face, fw - 1 - k, k, 1, Hs - 2 * k, 0xC8D2D6E2u);
+        }
+        gfx_fill(face, b, b, Hs / 40, Hs - 2 * b, 0x3CFFFFFFu);
+    }
+    gloss(face, 0, 0, fw, Hs, 26);
+
+    gfx_fill(spine, 0, 0, sw, Hs, 0xFF08080Au);
+    psx_logo(spine, (float)sw * 0.2f, (float)sw * 0.25f, (float)sw * 0.6f);
+    y = (int)((float)sw * 1.25f);
+    n = vtext(spine, (sw - (int)((float)sw * 0.5f)) / 2, y, TTF_MEDIUM, (int)((float)sw * 0.5f),
+              ps2 ? "PlayStation 2" : "PlayStation", 0xFFEBEBF0u, Hs / 2);
+    snprintf(title, sizeof(title), "%s", m->title ? m->title : "");
+    if (strchr(title, ':'))
+        *strchr(title, ':') = '\0';         /* «Castlevania: Symphony…» — на корешке до двоеточия */
+    if (strstr(title, " - "))
+        *strstr(title, " - ") = '\0';
+    {   /* не влезает — сначала мельче (до 60 %), потом укорачиваем */
+        int px = (int)((float)sw * 0.5f), room = Hs - (y + n + sw * 3 / 5) - sw / 2;
+        while (px > sw * 3 / 10 && ttf_width(TTF_SEMIBOLD, px, title) > room)
+            px--;
+        while (title[0] && !vtext(spine, (sw - px) / 2, y + n + sw * 3 / 5, TTF_SEMIBOLD, px, title,
+                                  m->fg | 0xFF000000u, room))
+            title[strlen(title) - 1] = '\0';
+    }
 }
 
-/* Коробка DVD PS2: тёмно-синий пластик, чёрная шапка с логотипом, обложка ниже. */
-static void draw_ps2(const Media *m, Image *d)
+/* Картридж NES: фото корпуса, наклейка крупнее родного углубления — бумажная, с тенью. */
+static void build_cart(const Media *m, int Hs, Image *face, Image *spine)
 {
-    int w = d->w, h = d->h - 2, band = imax(7, h * 13 / 100);
+    static Image cart;
+    Image sc, strip;
+    int fw, sw, i;
+    float k, lx, ly, lw, lh, bw;
 
-    rbox(d, 0, 0, w, h, 1, 0xFF15204Au);
-    gfx_fill(d, 2, 2, w - 4, band - 2, 0xFF050608u);
-    ps2_logo(d, 4, 2 + (band - 2 - 5) / 2, 0xFFDDE3F2u);
-    gfx_fill(d, w - 6, 2 + (band - 2 - 3) / 2, 3, 3, 0xFF3A7FE0u);    /* значок справа в шапке */
+    if (!cart.px)
+        cart = asset(png_nes_cart, sizeof(png_nes_cart));
+    if (!cart.px)
+        return;
+    fw = cart.w * Hs / cart.h;
+    *face = image_resize(&cart, fw, Hs);
+    if (!face->px)
+        return;
+    k = (float)Hs / 1351.0f;                /* размеры наклейки — в точках исходного фото */
+    lx = (float)fw * NES_LABEL[0];
+    ly = (float)Hs * NES_LABEL[1];
+    lw = (float)fw * (NES_LABEL[2] - NES_LABEL[0]);
+    lh = (float)Hs * (NES_LABEL[3] - NES_LABEL[1]);
+    /* тень от наклейки на пластик: размытый прямоугольник, только по корпусу */
+    sc = image_new(fw, Hs);
+    if (sc.px) {
+        int n;
+        memset(sc.px, 0, (size_t)fw * (size_t)Hs * 4);
+        gfx_rrect_aa(&sc, lx + 6 * k, ly + 10 * k, lw, lh + 2 * k, 18 * k, 0x96000000u);
+        image_blur(&sc, imax(1, (int)(10 * k)));
+        for (n = 0; n < fw * Hs; n++)
+            if (face->px[n] >> 24)
+                gfx_over(&face->px[n], 0x28282Cu, (sc.px[n] >> 24) * (face->px[n] >> 24) / 255);
+        image_free(&sc);
+    }
+    gfx_rrect_aa(face, lx, ly, lw, lh, 18 * k, 0xFFECEAE4u);     /* бумага */
+    bw = 14 * k;
     if (m->front)
-        cover_fill(d, m->front, 2, band + 1, w - 4, h - band - 3, 0.5f);
+        cover_fill(face, m->front, (int)(lx + bw), (int)(ly + bw), (int)(lw - 2 * bw), (int)(lh - 2 * bw), 0.0f, 8 * k);
+    gloss(face, (int)lx, (int)ly, (int)lw, (int)lh, 26);
+    /* торец: та же пластмасса (левый край фото), сверху рифление */
+    sw = (int)((float)fw * 0.13f);
+    strip = image_crop(face, (int)(4 * k), 0, imax(1, (int)(56 * k)), Hs);
+    *spine = image_resize(&strip, sw, Hs);
+    image_free(&strip);
+    for (i = Hs / 33; spine->px && i < Hs * 45 / 100; i += imax(4, Hs / 50))
+        gfx_fill(spine, sw / 8, i, sw * 3 / 4, imax(2, Hs / 220), 0xFF5C5C60u);
 }
 
-/* Картридж NES: серый корпус, рифлёный верх, наклейка с обложкой, рёбра и стрелка внизу. */
-static void draw_nes(const Media *m, Image *d)
+/* microSD: фото корпуса, на месте наклейки — обложка. Корешка нет — у карты вырез сбоку. */
+static void build_sd(const Media *m, int Hs, Image *face)
 {
-    int w = d->w, h = d->h - 2, i, lx = imax(3, w / 9), ly = 4, lw = w - 2 * lx, lh = h * 58 / 100;
-    uint32_t body = 0xFF8E8D95u, low = 0xFF6F6E77u;
+    static Image card;
+    Image art = { NULL, 0, 0 };
+    const Image *front = m->front;
+    int fw;
+    float lx, ly, lw, lh, k;
 
-    rbox(d, 0, 0, w, h, 1, body);
-    for (i = 2; i < w - 2; i += 3)                       /* рифление сверху */
-        gfx_fill(d, i, 1, 1, 2, shade(body, -50));
-    gfx_fill(d, lx - 1, ly - 1, lw + 2, lh + 2, shade(body, -70));
-    if (m->front)
-        cover_fill(d, m->front, lx, ly, lw, lh, 0.15f);
+    if (!card.px)
+        card = asset(png_microsd, sizeof(png_microsd));
+    if (!card.px)
+        return;
+    fw = card.w * Hs / card.h;
+    *face = image_resize(&card, fw, Hs);
+    if (!face->px)
+        return;
+    k = (float)Hs / 1379.0f;
+    lx = (float)fw * SD_LABEL[0];
+    ly = (float)Hs * SD_LABEL[1];
+    lw = (float)fw * (SD_LABEL[2] - SD_LABEL[0]);
+    lh = (float)Hs * (SD_LABEL[3] - SD_LABEL[1]);
+    if (!front && m->icon && m->icon->px) {
+        /* своей обложки нет: наклейка в двух цветах игры, по центру — иконка целым множителем */
+        int s, iw, ih;
+        art = image_new((int)lw, (int)lh);
+        if (art.px) {
+            gfx_vgradient(&art, 0, 0, art.w, art.h, shade(m->bg, 30), shade(m->bg, -90));
+            s = imax(1, imin(art.w * 3 / 5 / m->icon->w, art.h * 3 / 5 / m->icon->h));
+            iw = m->icon->w * s;
+            ih = m->icon->h * s;
+            gfx_blit_scaled(&art, m->icon, (art.w - iw) / 2, (art.h - ih) / 2, iw, ih, 255);
+            front = &art;
+        }
+    }
+    if (front)
+        cover_fill(face, front, (int)lx, (int)ly, (int)lw, (int)lh, 0.5f, 16 * k);
+    gloss(face, (int)lx, (int)ly, (int)lw, (int)lh, 24);
+    image_free(&art);
+}
+
+Image media_render(const Media *m, int h)
+{
+    int Hs = h * SS, W, sw, fw, x, y;
+    Image face = { NULL, 0, 0 }, spine = { NULL, 0, 0 }, big, out = { NULL, 0, 0 };
+    float ff = (float)Hs * 0.03f, fs = (float)Hs * 0.022f;
+    unsigned extra = m->kind == GAME_NES ? 215 : 255;
+
+    if (m->kind == GAME_PSX || m->kind == GAME_PS2)
+        build_case(m, Hs, &face, &spine);
+    else if (m->kind == GAME_NES)
+        build_cart(m, Hs, &face, &spine);
     else
-        gfx_fill(d, lx, ly, lw, lh, m->bg);
-    gfx_fill(d, 1, ly + lh + 3, w - 2, h - ly - lh - 4, low);
-    for (i = ly + lh + 5; i < h - 2; i += 2) {
-        gfx_fill(d, 3, i, w / 4, 1, shade(low, -50));
-        gfx_fill(d, w - 3 - w / 4, i, w / 4, 1, shade(low, -50));
+        build_sd(m, Hs, &face);
+    if (!face.px) {
+        image_free(&spine);
+        return out;
     }
-    for (i = 0; i < 3; i++)                              /* стрелка «вставлять сюда» */
-        gfx_fill(d, w / 2 - 3 + i, ly + lh + 6 + i, 7 - 2 * i, 1, shade(low, -60));
-}
-
-/* Карта памяти J2ME: корпус и наклейка — два цвета игры, срезанный угол, контакты сверху. */
-static void draw_sd(const Media *m, Image *d)
-{
-    int w = d->w, h = d->h - 2, cut = w * 22 / 100, i, j, lx = 3, ly = h * 22 / 100, lw = w - 6, lh = h * 66 / 100;
-    uint32_t body = shade(m->bg, -80), label = shade(m->fg, 40);
-
-    rbox(d, 0, 0, w, h, 1, body);
-    for (j = 0; j < cut; j++)                            /* срезанный правый верхний угол */
-        for (i = w - cut + j; i < w; i++)
-            d->px[j * w + i] = 0;
-    for (i = 3; i + 2 < w - cut; i += 4)                 /* контакты */
-        gfx_fill(d, i, 2, 2, ly - 4, shade(label, 20));
-    gfx_fill(d, lx, ly, lw, lh, label);
-    if (m->front)
-        cover_fill(d, m->front, lx + 2, ly + 2, lw - 4, lh - 4, 0.5f);
-    else if (m->icon && m->icon->px) {
-        /* целый множитель — пиксель-арт иконки остаётся ровным; крупная иконка — уменьшаем */
-        int k = imin((lw - 4) / m->icon->w, (lh - 4) / m->icon->h), iw, ih;
-        if (k >= 1) {
-            iw = m->icon->w * k;
-            ih = m->icon->h * k;
-        } else {
-            float f = fminf((float)(lw - 4) / (float)m->icon->w, (float)(lh - 4) / (float)m->icon->h);
-            iw = (int)((float)m->icon->w * f);
-            ih = (int)((float)m->icon->h * f);
+    fw = face.w;
+    sw = spine.px ? spine.w : 0;
+    W = fw + sw;
+    big = image_new(W, Hs);
+    if (big.px) {
+        memset(big.px, 0, (size_t)W * (size_t)Hs * 4);
+        if (sw)
+            warp(&big, &spine, 0, sw, fs, (float)Hs - fs, 0, (float)Hs, 60);
+        warp(&big, &face, sw, W, 0, (float)Hs, ff, (float)Hs - ff, 0);
+        /* общий свет на все носители: сверху светлее, книзу темнее; серая пластмасса — чуть тише */
+        for (y = 0; y < Hs; y++) {
+            unsigned l = (255u - (unsigned)y * 70u / (unsigned)Hs) * extra / 255u;
+            for (x = 0; x < W; x++) {
+                uint32_t *p = &big.px[y * W + x];
+                if (*p >> 24)
+                    *p = (*p & 0xFF000000u) | (gfx_mix(0xFF000000u, *p, l) & 0xFFFFFFu);
+            }
         }
-        gfx_blit_scaled(d, m->icon, lx + (lw - iw) / 2, ly + (lh - ih) / 2, iw, ih, 255);
+        out = image_resize(&big, W / SS, h);
     }
-    gfx_fill(d, 0, h * 30 / 100, 1, h / 9, shade(body, 60));     /* защёлка защиты записи */
-}
-
-Image media_render(const Media *m, int w, int h)
-{
-    Image d = image_new(w, h);
-
-    if (!d.px)
-        return d;
-    memset(d.px, 0, (size_t)w * h * 4);
-    switch (m->kind) {
-    case GAME_PSX: draw_ps1(m, &d); break;
-    case GAME_PS2: draw_ps2(m, &d); break;
-    case GAME_NES: draw_nes(m, &d); break;
-    default:       draw_sd(m, &d);  break;
-    }
-    finish(&d, 1);
-    return d;
+    image_free(&big);
+    image_free(&face);
+    image_free(&spine);
+    return out;
 }
 
 /* ---------- цвета игры ---------- */

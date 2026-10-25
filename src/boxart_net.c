@@ -1,7 +1,9 @@
 /* Загрузка обложек из libretro-thumbnails (thumbnails.libretro.com) в фоне. Список имён
  * приставки скачивается один раз (страница папки Named_Boxarts) и обновляется раз в месяц;
  * обложка — PNG, уменьшается до 400 точек по высоте и кладётся в <данные>/boxart/<приставка>.
- * Не нашли игру — рядом остаётся <имя>.none, чтобы не искать её снова до нового списка. */
+ * Не нашли игру — рядом остаётся <имя>.none, чтобы не искать её снова до нового списка.
+ * Сведения (год, издатель, жанр) — из metadat базы libretro-database, где они есть (NES),
+ * в <имя>.meta вместе с найденным названием. */
 #include "boxart.h"
 #include "compat.h"
 #include "png.h"
@@ -14,13 +16,21 @@
 #include <time.h>
 
 #define BASE_URL    "https://thumbnails.libretro.com/"
+#define META_URL    "https://raw.githubusercontent.com/libretro/libretro-database/master/metadat/"
 #define INDEX_DAYS  30
 #define MAX_H       400
 
 typedef struct {
-    int  kind;
+    int  kind, own;         /* own — своя обложка есть, нужны только сведения */
     char base[256], name[128];
 } Job;
+
+/* Сведения из одного файла metadat: «comment "Название"» → значение поля. */
+typedef struct {
+    char  *buf;
+    char **name, **val;
+    int    count;
+} Meta;
 
 typedef struct {
     char  *buf;
@@ -28,7 +38,11 @@ typedef struct {
     int    count;
     long   stamp;       /* когда скачан список: по нему сверяются метки «.none» */
     int    failed;      /* не скачался — сети нет, остальные игры этой приставки не ищем */
+    Meta   meta[3];     /* releaseyear, publisher, genre */
+    int    meta_loaded;
 } Index;
+
+static const char *const meta_field[3] = { "releaseyear", "publisher", "genre" };
 
 static SDL_mutex   *mx;
 static Job         *jobs;
@@ -224,9 +238,148 @@ static int store(const char *tmp, const char *path)
     return ok;
 }
 
+/* Файл metadat в духе clrmamepro: game ( comment "…" поле "…" ). Скачиваем раз в месяц
+ * вместе со списком обложек; нет такого файла у приставки (404) — просто пусто. */
+static void load_meta(Index *ix, int kind, int field)
+{
+    char dir[900], path[1000], url[600], esc[256];
+    Meta *m = &ix->meta[field];
+    long len, now = (long)time(NULL), stamp = 0;
+    char *p, *cur = NULL;
+    int cap = 0;
+    FILE *f;
+
+    cache_dir(kind, dir, sizeof(dir));
+    snprintf(path, sizeof(path), "%s/%s.dat", dir, meta_field[field]);
+    if ((f = bt_fopen(path, "rb")) != NULL) {     /* первая строка — когда скачан */
+        if (fscanf(f, "# %ld", &stamp) != 1)
+            stamp = 0;
+        fclose(f);
+    }
+    if (now - stamp > INDEX_DAYS * 86400L) {
+        char tmp[1010];
+        snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+        url_escape(boxart_system(kind, NULL), esc, sizeof(esc));
+        snprintf(url, sizeof(url), META_URL "%s/%s.dat", meta_field[field], esc);
+        if (update_fetch(url, tmp, NULL) && (m->buf = read_all(tmp, &len)) != NULL &&
+            (f = bt_fopen(path, "wb")) != NULL) {
+            fprintf(f, "# %ld\n", now);
+            fwrite(m->buf, 1, (size_t)len, f);
+            fclose(f);
+        } else if ((f = bt_fopen(path, "wb")) != NULL) {
+            fprintf(f, "# %ld\n", now);  /* у приставки такого файла нет — не спрашиваем месяц */
+            fclose(f);
+        }
+        bt_remove(tmp);
+        free(m->buf);
+        m->buf = NULL;
+    }
+    if (!(m->buf = read_all(path, &len)))
+        return;
+    for (p = m->buf; *p; p++) {
+        char *q, *val;
+        if (*p != '\n')
+            continue;
+        q = p + 1;
+        while (*q == ' ' || *q == '\t')
+            q++;
+        if (strncmp(q, "comment \"", 9) == 0) {
+            cur = q + 9;
+            continue;
+        }
+        if (!cur || strncmp(q, meta_field[field], strlen(meta_field[field])) || q[strlen(meta_field[field])] != ' ')
+            continue;
+        val = strchr(q, '"');
+        if (!val || !strchr(val + 1, '"') || !strchr(cur, '"'))
+            continue;
+        if (m->count == cap) {
+            char **nn = realloc(m->name, sizeof(char *) * (size_t)(cap = cap ? cap * 2 : 1024));
+            char **nv = nn ? realloc(m->val, sizeof(char *) * (size_t)cap) : NULL;
+            if (!nn || !nv) {
+                if (nn)
+                    m->name = nn;
+                break;
+            }
+            m->name = nn;
+            m->val = nv;
+        }
+        m->name[m->count] = cur;
+        m->val[m->count] = val + 1;
+        m->count++;
+        cur = NULL;
+    }
+    /* строки кончаются кавычкой: обрезаем после того, как всё нашли */
+    for (len = 0; len < m->count; len++) {
+        *strchr(m->name[len], '"') = '\0';
+        *strchr(m->val[len], '"') = '\0';
+    }
+}
+
+/* Жанры libretro — по-русски; неизвестные остаются как есть. */
+static const char *genre_ru(const char *g)
+{
+    static const char *const map[][2] = {
+        { "Action", "Экшен" }, { "Adventure", "Приключения" }, { "Platform", "Платформер" },
+        { "Racing", "Гонки" }, { "Driving", "Гонки" }, { "Sports", "Спорт" }, { "Puzzle", "Головоломка" },
+        { "Shooter", "Шутер" }, { "Shoot'em Up", "Скролл-шутер" }, { "Fighting", "Файтинг" },
+        { "Beat'em Up", "Битэмап" }, { "Role-Playing (RPG)", "RPG" }, { "Role-Playing", "RPG" },
+        { "Strategy", "Стратегия" }, { "Simulation", "Симулятор" }, { "Board Game", "Настольная" },
+        { "Pinball", "Пинбол" }, { "Educational", "Обучающая" }, { "Music", "Музыкальная" },
+        { "Quiz", "Викторина" }, { "Compilation", "Сборник" }, { "Casino", "Казино" },
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(map) / sizeof(map[0]); i++)
+        if (!strcmp(g, map[i][0]))
+            return map[i][1];
+    return g;
+}
+
+/* Точное название, а нет — то же название с другими метками: «Super Mario Bros. (USA)». */
+static const char *meta_find(const Meta *m, const char *name)
+{
+    const char *br = strstr(name, " (");
+    size_t n = br ? (size_t)(br - name) : strlen(name);
+    int i;
+
+    for (i = 0; i < m->count; i++)
+        if (!strcmp(m->name[i], name))
+            return m->val[i];
+    for (i = 0; i < m->count; i++)
+        if (!strncmp(m->name[i], name, n) && !strncmp(m->name[i] + n, " (", 2))
+            return m->val[i];
+    return NULL;
+}
+
+/* <имя>.meta: найденное название и сведения о нём. */
+static void write_meta(Index *ix, const Job *j, const char *dir, const char *name)
+{
+    char path[1300];
+    const char *v;
+    FILE *f;
+    int k;
+
+    if (!ix->meta_loaded) {
+        ix->meta_loaded = 1;
+        for (k = 0; k < 3; k++)
+            load_meta(ix, j->kind, k);
+    }
+    snprintf(path, sizeof(path), "%s/%s.meta", dir, j->base);
+    if (!(f = bt_fopen(path, "wb")))
+        return;
+    fprintf(f, "name=%s\n", name);
+    if ((v = meta_find(&ix->meta[0], name)) != NULL)
+        fprintf(f, "year=%s\n", v);
+    if ((v = meta_find(&ix->meta[1], name)) != NULL)
+        fprintf(f, "publisher=%s\n", v);
+    if ((v = meta_find(&ix->meta[2], name)) != NULL)
+        fprintf(f, "genre=%s\n", genre_ru(v));
+    fclose(f);
+}
+
 static void process(Index *ix, const Job *j)
 {
-    char dir[900], path[1300], mark[1300], tmp[1300], url[1200], esc[700];
+    char dir[900], path[1300], mark[1300], tmp[1300], url[1200], esc[700], meta[1300];
     const char *sys = boxart_system(j->kind, NULL);
     long stamp = -1;
     FILE *f;
@@ -239,7 +392,8 @@ static void process(Index *ix, const Job *j)
     cache_dir(j->kind, dir, sizeof(dir));
     snprintf(path, sizeof(path), "%s/%s.png", dir, j->base);
     snprintf(mark, sizeof(mark), "%s/%s.none", dir, j->base);
-    if (bt_file_size(path) > 0)
+    snprintf(meta, sizeof(meta), "%s/%s.meta", dir, j->base);
+    if ((bt_file_size(path) > 0 || j->own) && bt_file_size(meta) > 0)
         return;
     if ((f = bt_fopen(mark, "rb")) != NULL) {
         if (fscanf(f, "%ld", &stamp) != 1)
@@ -249,6 +403,10 @@ static void process(Index *ix, const Job *j)
             return;
     }
     i = boxart_match((const char *const *)ix->names, ix->count, j->base, j->name);
+    if (i >= 0 && (bt_file_size(path) > 0 || j->own)) {   /* картинка уже есть — нужны сведения */
+        write_meta(ix, j, dir, ix->names[i]);
+        return;
+    }
     if (i >= 0) {
         char e1[256];
         url_escape(sys, e1, sizeof(e1));
@@ -257,6 +415,7 @@ static void process(Index *ix, const Job *j)
         snprintf(tmp, sizeof(tmp), "%s/%s.tmp", dir, j->base);
         if (update_fetch(url, tmp, NULL) && store(tmp, path)) {
             bt_remove(mark);
+            write_meta(ix, j, dir, ix->names[i]);
             SDL_AtomicIncRef(&gen);
             return;
         }
@@ -289,8 +448,14 @@ static int worker(void *arg)
         process(&ix[j.kind], &j);
     }
     for (k = 0; k <= GAME_PS2; k++) {
+        int m;
         free(ix[k].names);
         free(ix[k].buf);
+        for (m = 0; m < 3; m++) {
+            free(ix[k].meta[m].buf);
+            free(ix[k].meta[m].name);
+            free(ix[k].meta[m].val);
+        }
     }
     return 0;
 }
@@ -310,9 +475,15 @@ void boxart_fetch(const Library *lib)
         return;
     for (i = 0; i < lib->count; i++) {
         const Game *g = &lib->games[i];
-        if (!boxart_system(g->kind, NULL) || g->cover_own || boxart_cached(g->kind, g->base, path, sizeof(path)))
+        int have;
+        if (!boxart_system(g->kind, NULL))
             continue;
+        have = boxart_cached(g->kind, g->base, path, sizeof(path)) || g->cover_own;
+        snprintf(path + strlen(path) - 4, 6, ".meta");
+        if (have && bt_file_size(path) > 0)
+            continue;               /* и обложка, и сведения уже есть */
         nj[n].kind = g->kind;
+        nj[n].own = g->cover_own;
         snprintf(nj[n].base, sizeof(nj[n].base), "%s", g->base);
         snprintf(nj[n].name, sizeof(nj[n].name), "%s", g->name);
         n++;

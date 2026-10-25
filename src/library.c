@@ -359,6 +359,7 @@ void library_free(Library *lib)
     for (i = 0; i < lib->count; i++) {
         image_free(&lib->games[i].icon);
         image_free(&lib->games[i].cover);
+        image_free(&lib->games[i].art);
     }
     free(lib->games);
     free(lib->covers);
@@ -479,23 +480,53 @@ static int is_3d_box(const Image *im)
            (im->px[(im->h - 1) * im->w] >> 24) < 128;
 }
 
-/* Вписать пропорции aspect в w × h. */
-static void fit(float aspect, int w, int h, int *ow, int *oh)
+/* Сведения об игре из базы libretro (<кэш обложек>/<имя>.meta: год, издатель, жанр) и регион
+ * из меток имени файла: «(USA)», «(Europe)», «(Japan)». */
+static void load_meta(Game *g)
 {
-    *ow = w;
-    *oh = (int)((float)w / aspect + 0.5f);
-    if (*oh > h) {
-        *oh = h;
-        *ow = (int)((float)h * aspect + 0.5f);
+    static const char *const regions[][2] = { { "(USA", "США" }, { "(Europe", "Европа" }, { "(Japan", "Япония" },
+                                              { "(World", "Весь мир" }, { "(Russia", "Россия" } };
+    char path[1400], line[300];
+    FILE *f;
+    size_t i;
+
+    g->year[0] = g->publisher[0] = g->genre[0] = g->region[0] = path[0] = '\0';
+    if (g->kind == GAME_J2ME && g->vendor[0] && strcmp(g->vendor, "Unknown"))
+        snprintf(g->publisher, sizeof(g->publisher), "%.63s", g->vendor);
+    boxart_cached(g->kind, g->base, path, sizeof(path));
+    if (strlen(path) > 4) {     /* <кэш>/<имя>.png → <имя>.meta, даже если картинки нет */
+        snprintf(path + strlen(path) - 4, 6, ".meta");
+        if ((f = bt_fopen(path, "r")) != NULL) {
+            while (fgets(line, sizeof(line), f)) {
+                char *v = strchr(line, '=');
+                if (!v)
+                    continue;
+                *v++ = '\0';
+                v[strcspn(v, "\r\n")] = '\0';
+                if (!strcmp(line, "year"))
+                    snprintf(g->year, sizeof(g->year), "%s", v);
+                else if (!strcmp(line, "publisher"))
+                    snprintf(g->publisher, sizeof(g->publisher), "%s", v);
+                else if (!strcmp(line, "genre"))
+                    snprintf(g->genre, sizeof(g->genre), "%s", v);
+                else if (!strcmp(line, "name"))
+                    for (i = 0; i < sizeof(regions) / sizeof(regions[0]); i++)
+                        if (strstr(v, regions[i][0]))
+                            snprintf(g->region, sizeof(g->region), "%s", regions[i][1]);
+            }
+            fclose(f);
+        }
     }
+    for (i = 0; !g->region[0] && g->kind != GAME_J2ME && i < sizeof(regions) / sizeof(regions[0]); i++)
+        if (strstr(g->base, regions[i][0]))
+            snprintf(g->region, sizeof(g->region), "%s", regions[i][1]);
 }
 
-void library_load_cover(const Library *lib, Game *g, int w, int h)
+void library_load_cover(const Library *lib, Game *g, int h)
 {
     char path[1400];
     Image src = { NULL, 0, 0 }, gen = { NULL, 0, 0 };
     Media m;
-    int mw, mh;
 
     if (own_cover(lib, g, path, sizeof(path)))
         src = load_png_file(path);
@@ -509,17 +540,19 @@ void library_load_cover(const Library *lib, Game *g, int w, int h)
         snprintf(path, sizeof(path), "%s/shots/%s/title.png", data, g->base);
         src = load_png_file(path);
     }
+    load_meta(g);
     image_free(&g->cover);
+    image_free(&g->art);
     if (src.px && is_3d_box(&src)) {
-        fit((float)src.w / (float)src.h, w / MEDIA_PIXEL, h / MEDIA_PIXEL, &mw, &mh);
-        g->cover = image_resize(&src, mw, mh);      /* тоже крупным пикселем, как свои носители */
+        /* готовая объёмная коробка (пакеты 3D Boxes) — как есть */
+        g->cover = image_resize(&src, src.w * h / src.h, h);
         media_tones(&src, &g->tone_bg, &g->tone_fg);
     } else {
         memset(&m, 0, sizeof(m));
         m.kind = g->kind;
         m.title = g->name;
-        if (!src.px && g->kind != GAME_J2ME)
-            gen = make_cover(g, 160, (int)(160.0f / media_front_aspect(g->kind)));
+        if (!src.px && (g->kind != GAME_J2ME || !g->icon.px))   /* у J2ME с иконкой наклейку рисует media.c */
+            gen = make_cover(g, 240, (int)(240.0f / media_front_aspect(g->kind)));
         m.front = src.px ? &src : gen.px ? &gen : NULL;
         m.icon = &g->icon;
         if (m.front)
@@ -533,8 +566,13 @@ void library_load_cover(const Library *lib, Game *g, int w, int h)
         }
         g->tone_bg = m.bg;
         g->tone_fg = m.fg;
-        fit(media_aspect(g->kind), w / MEDIA_PIXEL, h / MEDIA_PIXEL, &mw, &mh);
-        g->cover = media_render(&m, mw, mh);
+        g->cover = media_render(&m, h);
+    }
+    /* арт для фона полки: обложка (или иконка J2ME), не больше 400 точек по высоте */
+    {
+        const Image *a = src.px ? &src : gen.px ? &gen : g->icon.px ? &g->icon : NULL;
+        if (a)
+            g->art = a->h > 400 ? image_resize(a, a->w * 400 / a->h, 400) : image_resize(a, a->w, a->h);
     }
     image_free(&src);
     image_free(&gen);

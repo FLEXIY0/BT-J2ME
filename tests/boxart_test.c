@@ -53,7 +53,7 @@ int main(void)
         m.title = "Test";
         m.bg = 0xFF336699u;
         m.fg = 0xFFFFCC00u;
-        img = media_render(&m, 90, 120);
+        img = media_render(&m, 120);
         opaque = 0;
         for (y = 0; y < img.h; y++)
             for (x = 0; x < img.w; x++)

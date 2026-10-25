@@ -15,8 +15,11 @@ typedef struct {
     char     name[128], vendor[128], version[32], profile[32];
     long long size;
     Image    icon;          /* иконка MIDlet из JAR, может быть пустой */
-    Image    cover;         /* носитель с обложкой (media.h), фон прозрачный; вписан в заданную область
-                               и уменьшен в MEDIA_PIXEL раз — на экране показывается крупным пикселем */
+    Image    cover;         /* носитель с обложкой (media.h) заданной высоты, фон прозрачный */
+    Image    art;           /* сама обложка (не больше 400 точек) — для фона полки */
+    char     year[8], publisher[64], genre[48], region[24];   /* сведения (может быть пусто) */
+    long     play_secs;     /* сколько всего играли, секунд */
+    long long last_played;  /* когда запускали (время Unix), 0 — ни разу */
     int      cover_ready;
     int      cover_custom;  /* 1 — своя картинка, 2 — скачанная, 0 — собрана автоматически */
     int      cover_own;     /* своя картинка в папке игр — из интернета не качаем */
@@ -37,9 +40,9 @@ int  library_scan(Library *lib, const char *dir);
 int  library_cue_files(const char *cue_path, char (*out)[256], int max);
 void library_free(Library *lib);
 
-/* Носитель игры, вписанный в w × h экранных точек. Обложка: <имя>.png рядом с игрой или в covers/ (там и
+/* Носитель игры высотой h точек. Обложка: <имя>.png рядом с игрой или в covers/ (там и
  * похожее имя, например из пакета объёмных коробок — тогда она показывается как есть), потом
  * скачанная из libretro, потом заставка игры; иначе рисуется сама. Заодно — цвета игры. */
-void library_load_cover(const Library *lib, Game *g, int w, int h);
+void library_load_cover(const Library *lib, Game *g, int h);
 
 #endif

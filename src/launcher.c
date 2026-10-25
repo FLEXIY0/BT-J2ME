@@ -13,6 +13,8 @@
 #include "update.h"
 #include "boxart.h"
 #include "media.h"
+#include "shelf.h"
+#include "stats.h"
 #include "util.h"
 #include "version.h"
 
@@ -89,7 +91,8 @@ typedef struct {
     float        cur_x, cur_y;
     uint32_t     cur_t;
     uint32_t     launch_t0;
-    int          hide_sel;      /* снимок для запуска «вставить картридж»: выбранный носитель не рисуем */
+    Shelf        shelf;         /* вкладка игр в разрешении экрана (shelf.c) */
+    int          hd;            /* сейчас рисуем её, а не пиксельные экраны */
     unsigned     art_gen;       /* boxart_generation(): появились ли новые обложки из интернета */
 } Ui;
 
@@ -404,12 +407,15 @@ static void theme_step(Ui *ui, float dt)
 
 static void layout(Ui *ui)
 {
-    int dw, dh, target, k, i, old_w = ui->cover_w, old_h = ui->cover_h, region, title_h, gap, group;
+    int dw, dh, target, k, i, old_h = ui->cover_h, region, title_h, gap, group;
 
     if (!ui->th)
         ui->theme = ui->set.dark ? theme_dark : theme_light;
     ui->th = &ui->theme;
     platform_display_size(&dw, &dh);
+    /* носители рисуются под полку в разрешении экрана, сетка библиотеки их уменьшает */
+    if (ui->shelf.W != dw || ui->shelf.H != dh)
+        shelf_layout(&ui->shelf, dw, dh);
     /* Короткая сторона экрана ≈ target пикселей, множитель — целый: весь экран без полей. */
     target = ui->set.big_pixels ? 190 : 270;
     k = (imin(dw, dh) + target / 2) / target;
@@ -441,7 +447,7 @@ static void layout(Ui *ui)
     ui->box_top = ui->top_min + (ui->bottom_max - ui->top_min - group) / 2;
     ui->title_y = ui->box_top + ui->box_h + gap;
     ui->cover_w = ui->box_w;
-    ui->cover_h = ui->box_h;
+    ui->cover_h = ui->shelf.hi;
 
     /* Сетка библиотеки: минимум 3 колонки и примерно 2 ряда в видимой зоне. */
     ui->gap = imax(4, ui->W / 60);
@@ -453,8 +459,34 @@ static void layout(Ui *ui)
     }
     ui->cols = imax(1, (ui->W - 2 * ui->m + ui->gap) / (ui->cell_w + ui->gap));
 
-    for (i = 0; i < ui->lib.count && (old_w != ui->cover_w || old_h != ui->cover_h); i++)
+    if (ui->hd) {   /* полка — без пиксельного множителя: экран как есть */
+        ui->W = dw;
+        ui->H = dh;
+        platform_set_screen(dw, dh, SCALE_INTEGER);
+        ui->scr = platform_screen();
+        ui->s = imax(1, (imin(dw, dh) + 135) / 270);   /* размер курсора-руки */
+    }
+    for (i = 0; i < ui->lib.count && old_h != ui->cover_h; i++)
         ui->lib.games[i].cover_ready = 0;
+}
+
+/* Подсказки внизу полки: геймпад подключён — его кнопки, на ПК — клавиши, на телефоне — нет. */
+static int shelf_hints(const Ui *ui)
+{
+    if (ui->pad_connected && platform_hints())
+        return SHELF_HINTS_PAD;
+#ifdef __ANDROID__
+    return SHELF_HINTS_NONE;
+#else
+    return SHELF_HINTS_KEYS;
+#endif
+}
+
+/* Вкладка игр с играми и без окон поверх — полка в разрешении экрана. */
+static int upd_shown(const Ui *ui);
+static int hd_mode(const Ui *ui)
+{
+    return ui->tab == TAB_PLAY && ui->lib.count && !ui->ce && !ui->rs && !upd_shown(ui);
 }
 
 /* ---------- фон и коробки ---------- */
@@ -488,9 +520,8 @@ static void draw_background(Ui *ui, int top, int bottom)
             gfx_fill(s, x, y, 1, 1, ui->set.dark ? 0x0CFFFFFFu : 0x0A000000u);
 }
 
-/* Носитель игры в слоте x, y, w × h: стоит на нижнем крае слота, по центру, и отбрасывает
- * тень на «пол». Пиксель носителя — MEDIA_PIXEL точек экрана, если влезает (на полке), иначе
- * вписывается (сетка библиотеки). dim — насколько он растворяется в фоне (дальние). */
+/* Носитель игры в слоте x, y, w × h (сетка библиотеки): вписан, стоит на нижнем крае
+ * по центру и отбрасывает тень на «пол». dim — насколько он растворяется в фоне. */
 static void draw_box(Ui *ui, int x, int y, int w, int h, Game *g, int dim, uint32_t now)
 {
     Image *s = ui->scr;
@@ -502,14 +533,9 @@ static void draw_box(Ui *ui, int x, int y, int w, int h, Game *g, int dim, uint3
         aspect = (float)g->cover.w / (float)g->cover.h;
         fade = (int)clampf((float)(now - g->cover_time) * 255.0f / 300.0f, 0, 255);
     }
-    if (g && g->cover_ready && g->cover.px && g->cover.w * MEDIA_PIXEL <= w && g->cover.h * MEDIA_PIXEL <= h) {
-        dw = g->cover.w * MEDIA_PIXEL;
-        dh = g->cover.h * MEDIA_PIXEL;
-    } else {
-        f = fminf((float)w / aspect, (float)h);
-        dh = (int)f;
-        dw = (int)(f * aspect);
-    }
+    f = fminf((float)w / aspect, (float)h);
+    dh = (int)f;
+    dw = (int)(f * aspect);
     dx = x + (w - dw) / 2;
     dy = y + h - dh;
     /* тень на полу: ступеньками, как всё остальное */
@@ -520,7 +546,7 @@ static void draw_box(Ui *ui, int x, int y, int w, int h, Game *g, int dim, uint3
         gfx_fill(s, dx + in + 2, dy + dh + k, dw - 2 * in, 2, a << 24);
     }
     if (g && g->cover_ready && g->cover.px) {
-        gfx_blit_scaled(s, &g->cover, dx, dy, dw, dh, fade * (255 - dim) / 255);
+        gfx_blit_smooth(s, &g->cover, dx, dy, dw, dh, fade * (255 - dim) / 255, 0);
     } else {
         /* носитель ещё не нарисован — силуэт и бегущий блик */
         int sweep = (int)(now / 5 % (unsigned)(dw + 30)) - 15;
@@ -607,8 +633,6 @@ static void draw_play(Ui *ui, uint32_t now)
             box_rect(ui, i, &x, &y, &w, &h, &tilt);
             if (x > ui->W || x + w < 0)
                 continue;
-            if (i == ui->sel && ui->hide_sel)
-                continue;
             if (i == ui->sel && !ui->launch_t0)
                 y += (int)(1.5f * sinf((float)now / 650.0f));   /* коробка чуть «дышит» */
             draw_box(ui, x, y, w, h, &ui->lib.games[i], dist >= 2 ? 110 : 0, now);
@@ -659,8 +683,6 @@ static void draw_library(Ui *ui, uint32_t now)
         int x, y, lift = i == ui->sel ? 2 : 0;
         grid_cell(ui, i, &x, &y);
         if (y + ui->cell_h < ui->top_min - 4 || y > bottom)
-            continue;
-        if (i == ui->sel && ui->hide_sel)
             continue;
         if (i == ui->sel && !ui->focus_tabs)
             rrect(s, x - 3, y - 3 - lift, ui->cell_w + 6, ui->cell_h + 6, 2, ui->th->accent);
@@ -805,7 +827,7 @@ static void draw_tabs(Ui *ui)
 
 /* ---------- анимации запуска ---------- */
 
-enum { FX_CRT, FX_WARP, FX_DRIVE, FX_SHATTER, FX_INSERT, FX_COUNT };
+enum { FX_CRT, FX_WARP, FX_DRIVE, FX_SHATTER, FX_DOTS, FX_COUNT };
 
 static uint32_t fx_seed;
 static unsigned fx_rand(void)
@@ -906,7 +928,7 @@ static void fx_flash(Image *d, float a)
 /* Длительность анимации запуска. */
 static uint32_t launch_ms(const Ui *ui)
 {
-    return ui->fx == FX_SHATTER ? 3300 : ui->fx == FX_INSERT ? 1500 : 1700;
+    return ui->fx == FX_SHATTER ? 3300 : ui->fx == FX_DOTS ? 800 : 1700;
 }
 
 /* Переход «вжух»: чёрные круги растут справа налево, каждый в своей клетке, чуть сдвинут
@@ -934,60 +956,6 @@ static void fx_dots(Ui *ui, float p)
     }
 }
 
-/* Запуск «вставить картридж»: снизу выезжает приставка со щелью, носитель уходит в неё,
- * загорается лампочка, и экран справа налево заливают чёрные круги.
- *   0–0.15     приставка поднимается, носитель чуть приподнимается;
- *   0.15–0.47  носитель опускается в щель (с ускорением) и щёлкает;
- *   0.47–0.55  лампочка зелёная, экран вздрагивает;
- *   0.5–1      круги. */
-static void fx_insert(Ui *ui, float t)
-{
-    Image *s = ui->scr;
-    Game *g = &ui->lib.games[ui->sel];
-    int bx, by, bw, bh, dw, dh, dx, dy, plate_h = ui->tab_h + ui->H / 12, py, slot_w, shake, j;
-    float tilt, rise = smooth(t / 0.15f), lift = t < 0.15f ? sinf(t / 0.15f * 3.1416f) : 0;
-    float fall = clampf((t - 0.15f) / 0.32f, 0, 1);
-
-    if (ui->tab == TAB_LIBRARY) {
-        grid_cell(ui, ui->sel, &bx, &by);
-        bw = ui->cell_w;
-        bh = ui->cell_h;
-    } else
-        box_rect(ui, ui->sel, &bx, &by, &bw, &bh, &tilt);
-    if (g->cover_ready && g->cover.px && g->cover.w * MEDIA_PIXEL <= bw && g->cover.h * MEDIA_PIXEL <= bh) {
-        dw = g->cover.w * MEDIA_PIXEL;
-        dh = g->cover.h * MEDIA_PIXEL;
-    } else {
-        dh = bh;
-        dw = (int)((float)bh * media_aspect(g->kind));
-    }
-    /* приставка — по центру экрана, носитель встаёт над её щелью */
-    py = ui->H - (int)((float)plate_h * rise);
-    dx = (int)((float)(bx + (bw - dw) / 2) + ((float)(ui->W - dw) / 2 - (float)(bx + (bw - dw) / 2)) * smooth(t / 0.2f));
-    dy = by + bh - dh - (int)(lift * (float)(ui->H / 30)) +
-         (int)((float)(py - dh / 3 - (by + bh - dh)) * fall * fall);    /* торчит треть */
-    shake = t > 0.47f && t < 0.53f ? ((int)(t * 400) % 2 ? 1 : -1) : 0;
-
-    gfx_blit(s, &ui->snap, shake, 0, 255);
-    gfx_fill(s, 0, 0, ui->W, ui->H, (uint32_t)(smooth(t / 0.4f) * 110) << 24);   /* полка темнеет */
-    if (g->cover_ready && g->cover.px)
-        gfx_blit_scaled(s, &g->cover, dx + shake, dy, dw, dh, 255);
-    else
-        rrect(s, dx, dy, dw, dh, 3, ui->th->tab_hi);
-    /* приставка: тёмный корпус, светлая кромка, щель под носитель и лампочка */
-    slot_w = dw + 8;
-    gfx_fill(s, 0, py, ui->W, ui->H - py, 0xFF1D1C24u);
-    gfx_fill(s, 0, py, ui->W, 2, 0xFF3A3946u);
-    for (j = py + 6; j < ui->H; j += 4)
-        gfx_fill(s, ui->W / 12, j, ui->W / 6, 2, 0xFF15141Bu);
-    gfx_fill(s, (ui->W - slot_w) / 2 + shake, py - 2, slot_w, 4, 0xFF050507u);
-    gfx_fill(s, (ui->W - slot_w) / 2 + shake, py + 2, slot_w, 1, 0xFF2A2933u);
-    gfx_fill(s, ui->W - ui->W / 8, py + 8, 4, 4, t > 0.47f ? 0xFF3CE06Au : 0xFF7A1F25u);
-    if (t > 0.47f)
-        gfx_fill(s, ui->W - ui->W / 8 - 2, py + 6, 8, 8, 0x403CE06Au);
-    fx_dots(ui, (t - 0.5f) / 0.5f);
-}
-
 static void launch_fx(Ui *ui, float t, uint32_t now)
 {
     Image *s = ui->scr, *src = &ui->snap;
@@ -998,8 +966,9 @@ static void launch_fx(Ui *ui, float t, uint32_t now)
     cx = (float)bx + (float)bw / 2;
     cy = (float)by + (float)bh / 2;
     switch (ui->fx) {
-    case FX_INSERT:
-        fx_insert(ui, t);
+    case FX_DOTS:     /* полка как есть, её заливают чёрные круги справа налево */
+        gfx_blit(ui->scr, &ui->snap, 0, 0, 255);
+        fx_dots(ui, t / 0.88f);
         break;
     case FX_CRT: {
         /* коробка наезжает на весь экран → мозаика → кинескоп схлопывается в полоску и точку */
@@ -1312,17 +1281,20 @@ static int run_game(Ui *ui, Game *g)
     ScaleMode mode = ui->cli_scale != SCALE_AUTO ? ui->cli_scale : ui->set.sharp ? SCALE_INTEGER : SCALE_AUTO;
     char err[200];
     MidpResult r;
-    uint32_t until;
+    uint32_t until, t0;
 
-    if (ui->fx == FX_SHATTER || ui->fx == FX_INSERT)
+    if (ui->fx == FX_SHATTER || ui->fx == FX_DOTS)
         platform_fade_in(700);     /* анимация ушла в черноту — игра из неё проявляется */
     platform_cursor_mode(0);        /* в игре стик снова крестовина, указатель — системный */
+    t0 = platform_ticks_ms();
     r = g->kind == GAME_NES ? nes_run(g->path, g->base, mode, err, sizeof(err))
       : g->kind == GAME_PSX ? psx_run(g->path, g->base, mode, err, sizeof(err))
       : g->kind == GAME_PS2 ? ps2_run(g->path, g->base, mode, err, sizeof(err))
                             : midp_run(g->path, g->base, mode, err, sizeof(err));
     platform_cursor_mode(1);
     ui->cur_press = 0;
+    if (r != MIDP_ERROR)
+        stats_add(g, (long)((platform_ticks_ms() - t0) / 1000));   /* «в игре» и «последний запуск» */
 
     if (r == MIDP_QUIT)
         return 1;
@@ -1401,7 +1373,7 @@ static void load_covers(Ui *ui, uint32_t now)
                 continue;
             g = &ui->lib.games[cand[c]];
             if (!g->cover_ready) {
-                library_load_cover(&ui->lib, g, ui->cover_w, ui->cover_h);
+                library_load_cover(&ui->lib, g, ui->cover_h);
                 g->cover_time = now;
                 return;
             }
@@ -1452,7 +1424,7 @@ static void on_key(Ui *ui, int key, uint32_t now)
         } else if (key == KEY_RIGHT || key == KEY_NUM0 + 6) {
             select_game(ui, ui->sel + 1);
             ui->held = 1;
-        } else if (key == KEY_DOWN || key == KEY_NUM0 + 8) {
+        } else if ((key == KEY_DOWN || key == KEY_NUM0 + 8) && !ui->hd) {
             ui->focus_tabs = 1;
         } else if (key == KEY_NUM0) {       /* 0 (View на геймпаде) — сменить обложку */
             ce_open(ui);
@@ -1961,6 +1933,31 @@ static void on_pointer(Ui *ui, int px, int py, uint32_t now)
 {
     int i;
 
+    if (ui->hd) {
+        int game = -1;
+        switch (shelf_hit(&ui->shelf, &ui->lib, ui->pos, px, py, &game)) {
+        case SHELF_HIT_PLAY:
+            start_launch(ui, now);
+            break;
+        case SHELF_HIT_COVER:
+            ce_open(ui);
+            break;
+        case SHELF_HIT_TAB_L:
+            ui->tab = TAB_LIBRARY;
+            break;
+        case SHELF_HIT_TAB_R:
+            ui->tab = TAB_SETTINGS;
+            break;
+        case SHELF_HIT_GAME:
+            if (game == ui->sel)
+                start_launch(ui, now);
+            else
+                select_game(ui, game);
+            break;
+        }
+        return;
+    }
+
     if (py >= ui->H - ui->tab_h) {
         ui->tab = imin(TAB_COUNT - 1, px * TAB_COUNT / ui->W);
         ui->focus_tabs = 0;
@@ -2039,6 +2036,7 @@ static void rescan(Ui *ui, const char *games_dir)
     snprintf(keep, sizeof(keep), "%s", ui->lib.count ? ui->lib.games[ui->sel].path : "");
     library_free(&ui->lib);
     library_scan(&ui->lib, games_dir);
+    stats_load(&ui->lib);
     boxart_fetch(&ui->lib);
     if (!ui->lib.dir[0])
         snprintf(ui->lib.dir, sizeof(ui->lib.dir), "%s", games_dir);
@@ -2338,7 +2336,7 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
     audio_set_master(ui.cli_mute || !ui.set.sound ? 0 : 100);
     {   /* вид анимации запуска; BT_LAUNCH_ANIM — посмотреть другие */
         const char *e = getenv("BT_LAUNCH_ANIM");
-        ui.fx = e ? atoi(e) % FX_COUNT : FX_INSERT;
+        ui.fx = e ? atoi(e) % FX_COUNT : FX_DOTS;
     }
     cfg->width = 400;
     cfg->height = 240;
@@ -2353,6 +2351,7 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
         bt_mkdirs(bios);
     }
     library_scan(&ui.lib, games_dir);
+    stats_load(&ui.lib);
     boxart_fetch(&ui.lib);
     if (!ui.lib.dir[0])
         snprintf(ui.lib.dir, sizeof(ui.lib.dir), "%s", games_dir);
@@ -2373,9 +2372,10 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
 
         prev = now;
         platform_display_size(&cw, &ch);
-        if (cw != dw || ch != dh) {
+        if (cw != dw || ch != dh || ui.hd != hd_mode(&ui)) {
             dw = cw;
             dh = ch;
+            ui.hd = hd_mode(&ui);
             layout(&ui);
         }
 
@@ -2439,7 +2439,7 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
                     on_pointer(&ui, ui.ptr_x0, ui.ptr_y0, now);
                 else if (abs(dx) > abs(dy) && ui.tab != TAB_SETTINGS && ui.ptr_y0 < ui.H - ui.tab_h) {
                     /* свайп по полке: чем длиннее, тем дальше листаем */
-                    int n = -dx / imax(1, ui.box_w * 2 / 3);
+                    int n = -dx / imax(1, ui.hd ? ui.shelf.lo : ui.box_w * 2 / 3);
                     select_game(&ui, ui.sel + (n ? n : dx < 0 ? 1 : -1));
                 }
             }
@@ -2475,21 +2475,23 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
         } else {
             uint32_t l0 = ui.launch_t0;
             ui.launch_t0 = 0;           /* снимок полки — без анимации */
-            ui.hide_sel = l0 && ui.fx == FX_INSERT;
-            draw_background(&ui, 0, ui.H);
-            if (ui.tab == TAB_PLAY)
-                draw_play(&ui, now);
-            else if (ui.tab == TAB_LIBRARY)
-                draw_library(&ui, now);
-            else
-                draw_settings(&ui);
-            draw_tabs(&ui);
+            if (ui.hd) {
+                shelf_draw(&ui.shelf, ui.scr, &ui.lib, ui.sel, ui.pos, now, shelf_hints(&ui));
+            } else {
+                draw_background(&ui, 0, ui.H);
+                if (ui.tab == TAB_PLAY)
+                    draw_play(&ui, now);
+                else if (ui.tab == TAB_LIBRARY)
+                    draw_library(&ui, now);
+                else
+                    draw_settings(&ui);
+                draw_tabs(&ui);
+            }
             if (ui.rs)
                 draw_reset(&ui);
             else if (upd_shown(&ui) && !ui.launch_t0)
                 draw_update(&ui);
             ui.launch_t0 = l0;
-            ui.hide_sel = 0;
             if (ui.launch_t0) {
                 ui.snap = image_new(ui.W, ui.H);
                 if (ui.snap.px) {
@@ -2514,6 +2516,7 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
         /* 30 кадров в секунду хватает для плавного меню и вдвое экономит процессор */
         platform_sleep_ms(now + 33 > platform_ticks_ms() ? now + 33 - platform_ticks_ms() : 1);
     }
+    shelf_free(&ui.shelf);
     library_free(&ui.lib);
     platform_shutdown();
     return 0;

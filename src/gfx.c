@@ -331,3 +331,177 @@ int gfx_hints(Image *d, const Font *f, int x, int y, const char *pairs, uint32_t
     }
     return x - x0;
 }
+
+/* ---------- для полки: плавное масштабирование, размытие, сглаженные фигуры ---------- */
+
+void gfx_over(uint32_t *p, uint32_t rgb, unsigned a)
+{
+    unsigned da = *p >> 24, na;
+
+    if (!a)
+        return;
+    if (da == 255) {
+        *p = gfx_mix(*p, rgb, a);
+        return;
+    }
+    na = a + da * (255 - a) / 255;
+    if (!na)
+        return;
+    {   /* смешиваем с учётом прозрачности того, что под нами */
+        unsigned w = a * 255 / na, s, r = 0;
+        for (s = 0; s < 24; s += 8) {
+            unsigned cs = (rgb >> s) & 255, cd = (*p >> s) & 255;
+            r |= ((cs * w + cd * (255 - w)) / 255) << s;
+        }
+        *p = r | na << 24;
+    }
+}
+
+void gfx_blit_smooth(Image *d, const Image *s, int x, int y, int w, int h, int alpha, int dim)
+{
+    int i, j, ss = (w * 2 < s->w || h * 2 < s->h) ? 2 : 1;   /* сильное уменьшение — 2×2 выборки */
+    float fx = (float)s->w / (float)w, fy = (float)s->h / (float)h;
+
+    if (w <= 0 || h <= 0 || alpha <= 0 || !s->px)
+        return;
+    for (j = 0; j < h; j++) {
+        int dy = y + j;
+        if (dy < 0 || dy >= d->h)
+            continue;
+        for (i = 0; i < w; i++) {
+            int dx = x + i, a2, q;
+            unsigned ac = 0, rc = 0, gc = 0, bc = 0, n = 0;
+            if (dx < 0 || dx >= d->w)
+                continue;
+            for (q = 0; q < ss * ss; q++) {
+                float sx = ((float)i + ((float)(q % ss) + 0.5f) / (float)ss) * fx - 0.5f;
+                float sy = ((float)j + ((float)(q / ss) + 0.5f) / (float)ss) * fy - 0.5f;
+                int x0 = (int)floorf(sx), y0 = (int)floorf(sy), k;
+                float tx = sx - (float)x0, ty = sy - (float)y0;
+                for (k = 0; k < 4; k++) {
+                    int xx = x0 + (k & 1), yy = y0 + (k >> 1);
+                    float wgt = ((k & 1) ? tx : 1 - tx) * ((k >> 1) ? ty : 1 - ty);
+                    uint32_t p;
+                    unsigned pa, wq;
+                    xx = xx < 0 ? 0 : xx >= s->w ? s->w - 1 : xx;
+                    yy = yy < 0 ? 0 : yy >= s->h ? s->h - 1 : yy;
+                    p = s->px[yy * s->w + xx];
+                    pa = p >> 24;
+                    wq = (unsigned)(wgt * 256.0f);
+                    ac += pa * wq;
+                    rc += ((p >> 16) & 255) * pa * wq / 256;
+                    gc += ((p >> 8) & 255) * pa * wq / 256;
+                    bc += (p & 255) * pa * wq / 256;
+                }
+                n++;
+            }
+            if (!ac)
+                continue;
+            {
+                unsigned aa = ac / 256 / n;
+                uint32_t c = (rc * 256 / ac) << 16 | (gc * 256 / ac) << 8 | (bc * 256 / ac);
+                if (dim > 0)
+                    c = gfx_mix(c, 0, (unsigned)dim) & 0xFFFFFFu;
+                a2 = (int)aa * alpha / 255;
+                gfx_over(&d->px[dy * d->w + dx], c, (unsigned)a2);
+            }
+        }
+    }
+}
+
+void gfx_rrect_aa(Image *d, float x, float y, float w, float h, float r, uint32_t c)
+{
+    int i, j, x0 = (int)floorf(x), y0 = (int)floorf(y), x1 = (int)ceilf(x + w), y1 = (int)ceilf(y + h);
+    unsigned ca = c >> 24;
+
+    for (j = y0 < 0 ? 0 : y0; j < y1 && j < d->h; j++)
+        for (i = x0 < 0 ? 0 : x0; i < x1 && i < d->w; i++) {
+            /* расстояние до скруглённого прямоугольника — покрытие пикселя */
+            float px = (float)i + 0.5f - (x + w / 2), py = (float)j + 0.5f - (y + h / 2);
+            float qx = fabsf(px) - (w / 2 - r), qy = fabsf(py) - (h / 2 - r), dist, cov;
+            float ox = qx > 0 ? qx : 0, oy = qy > 0 ? qy : 0;
+            dist = sqrtf(ox * ox + oy * oy) + (qx > qy ? (qx < 0 ? qx : 0) : (qy < 0 ? qy : 0)) - r;
+            cov = 0.5f - dist;
+            if (cov <= 0)
+                continue;
+            if (cov > 1)
+                cov = 1;
+            gfx_over(&d->px[j * d->w + i], c & 0xFFFFFFu, (unsigned)(cov * (float)ca));
+        }
+}
+
+void gfx_poly(Image *d, const float *v, int n, uint32_t c)
+{
+    float ymin = v[1], ymax = v[1];
+    int k, y;
+
+    for (k = 1; k < n; k++) {
+        ymin = v[k * 2 + 1] < ymin ? v[k * 2 + 1] : ymin;
+        ymax = v[k * 2 + 1] > ymax ? v[k * 2 + 1] : ymax;
+    }
+    for (y = (int)ymin; y <= (int)ymax; y++) {
+        float yc = (float)y + 0.5f, xl = 1e9f, xr = -1e9f;
+        int x;
+        if (y < 0 || y >= d->h)
+            continue;
+        for (k = 0; k < n; k++) {
+            float ax = v[k * 2], ay = v[k * 2 + 1], bx = v[(k + 1) % n * 2], by = v[(k + 1) % n * 2 + 1];
+            if ((yc >= ay && yc < by) || (yc >= by && yc < ay)) {
+                float xi = ax + (yc - ay) * (bx - ax) / (by - ay);
+                xl = xi < xl ? xi : xl;
+                xr = xi > xr ? xi : xr;
+            }
+        }
+        for (x = (int)(xl + 0.5f); x < (int)(xr + 0.5f); x++)
+            if (x >= 0 && x < d->w)
+                gfx_over(&d->px[y * d->w + x], c & 0xFFFFFFu, c >> 24);
+    }
+}
+
+static void blur_line(uint32_t *p, int n, int stride, int r, uint32_t *tmp)
+{
+    unsigned s[4] = { 0, 0, 0, 0 };
+    int i, k, win = 2 * r + 1;
+
+    for (i = 0; i < n; i++)
+        tmp[i] = p[i * stride];
+    for (i = -r; i <= r; i++) {
+        uint32_t q = tmp[i < 0 ? 0 : i >= n ? n - 1 : i];
+        for (k = 0; k < 4; k++)
+            s[k] += (q >> (k * 8)) & 255;
+    }
+    for (i = 0; i < n; i++) {
+        uint32_t o = 0, add = tmp[i + r + 1 >= n ? n - 1 : i + r + 1], sub = tmp[i - r < 0 ? 0 : i - r];
+        for (k = 0; k < 4; k++) {
+            o |= (s[k] / (unsigned)win) << (k * 8);
+            s[k] += ((add >> (k * 8)) & 255) - ((sub >> (k * 8)) & 255);
+        }
+        p[i * stride] = o;
+    }
+}
+
+void image_blur(Image *im, int r)
+{
+    uint32_t *tmp;
+    int pass, x, y;
+
+    if (r < 1 || !im->px || !(tmp = malloc(sizeof(uint32_t) * (size_t)(im->w > im->h ? im->w : im->h))))
+        return;
+    for (pass = 0; pass < 3; pass++) {
+        for (y = 0; y < im->h; y++)
+            blur_line(im->px + (size_t)y * im->w, im->w, 1, r, tmp);
+        for (x = 0; x < im->w; x++)
+            blur_line(im->px + x, im->h, im->w, r, tmp);
+    }
+    free(tmp);
+}
+
+Image image_crop(const Image *s, int x, int y, int w, int h)
+{
+    Image o = image_new(w, h);
+    int j;
+
+    for (j = 0; o.px && j < h; j++)
+        memcpy(o.px + (size_t)j * w, s->px + (size_t)(y + j) * s->w + x, (size_t)w * 4);
+    return o;
+}

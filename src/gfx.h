@@ -36,6 +36,18 @@ void gfx_frame(Image *dst, int x, int y, int w, int h, uint32_t argb);
 /* alpha 0..255 умножается на альфу картинки */
 void gfx_blit(Image *dst, const Image *src, int x, int y, int alpha);
 void gfx_blit_scaled(Image *dst, const Image *src, int x, int y, int w, int h, int alpha);
+/* Плавное масштабирование (билинейно, с учётом альфы); dim 0..255 — притемнение. */
+void gfx_blit_smooth(Image *dst, const Image *src, int x, int y, int w, int h, int alpha, int dim);
+/* Наложение цвета с альфой a «поверх» — и на прозрачную картинку (альфа складывается). */
+void gfx_over(uint32_t *p, uint32_t rgb, unsigned a);
+/* Скруглённый прямоугольник со сглаженным краем, поверх (как gfx_over). */
+void gfx_rrect_aa(Image *dst, float x, float y, float w, float h, float r, uint32_t argb);
+/* Выпуклый многоугольник (n вершин), без сглаживания, поверх. */
+void gfx_poly(Image *dst, const float *xy, int n, uint32_t argb);
+/* Размытие рамкой радиуса r, три прохода (≈ гаусс), по всем каналам. */
+void image_blur(Image *img, int r);
+/* Кусок картинки (копия). */
+Image image_crop(const Image *src, int x, int y, int w, int h);
 /* Компакт-диск: радужный блик поворачивается на angle (0..1 — полный оборот). */
 void gfx_disc(Image *dst, int cx, int cy, int r, float angle, int alpha);
 

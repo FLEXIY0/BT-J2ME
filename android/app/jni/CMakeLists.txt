@@ -67,7 +67,7 @@ add_library(main SHARED
     ${BT}/library.c ${BT}/launcher.c ${BT}/platform_sdl2.c ${BT}/touch.c ${BT}/multitap.c ${BT}/update.c
     ${BT}/jvm_core.c ${BT}/jvm_interp.c ${BT}/jvm_lib.c ${BT}/rt.c ${BT}/midp.c ${BT}/audio.c ${BT}/compat.c
     ${BT}/nes.c ${BT}/nes_map.c ${BT}/nes_run.c ${BT}/psx_run.c ${BT}/lr_run.c ${BT}/disc.c ${BT}/ps2_run.c
-    ${BT}/boxart.c ${BT}/boxart_net.c ${BT}/media.c)
+    ${BT}/boxart.c ${BT}/boxart_net.c ${BT}/media.c ${BT}/ttf.c ${BT}/shelf.c ${BT}/stats.c)
 # SDLActivity ищет в libmain.so функцию SDL_main
 target_compile_definitions(main PRIVATE main=SDL_main)
 if(BT_VERSION)
