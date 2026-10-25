@@ -1,4 +1,4 @@
-/* Подбор обложки по названию (boxart_match) и объёмный носитель (media_render) без сети. */
+/* Подбор обложки по названию (boxart_match) и носитель (media_render) без сети. */
 #include "../src/boxart.h"
 #include "../src/media.h"
 
@@ -46,7 +46,7 @@ int main(void)
     match("Spyro the Dragon", "", "-");
     match("Final Fantasy IX", "", "-");
 
-    /* носитель: края прозрачные, середина закрашена, корешок слева темнее лица */
+    /* носитель: угол прозрачный (пиксельное скругление), остальное закрашено */
     for (kind = GAME_J2ME; kind <= GAME_PS2; kind++) {
         memset(&m, 0, sizeof(m));
         m.kind = kind;

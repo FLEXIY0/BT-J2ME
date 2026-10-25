@@ -27,12 +27,10 @@
 
 #define REPEAT_DELAY 330
 #define REPEAT_RATE  110
-#define LAUNCH_MS    (ui->fx == FX_SHATTER ? 3300 : 1700)   /* длительность анимации запуска */
 #define KEEP_COVERS  24     /* обложки дальше этого от выбранной выгружаем — память важнее */
 #define BOX_ASPECT   0.72f  /* коробка как у игр для приставок: ширина / высота */
-#define SIDE_SCALE   0.84f
-#define WIPE_MS      650    /* фон новой игры наползает кругами слева направо */
-#define MEDIA_WIDE   1.3f   /* носитель может быть шире коробки: коробка компакт-диска, картридж */
+#define SIDE_SCALE   1.0f   /* соседние носители того же размера — выглядывают по краям */
+#define DOTS_MS      700    /* переход в игру: чёрные круги справа налево */
 
 enum { TAB_LIBRARY, TAB_PLAY, TAB_SETTINGS, TAB_COUNT };
 enum { SET_THEME, SET_PIXELS, SET_SHARP, SET_SOUND, SET_FULL, SET_COUNT };
@@ -67,7 +65,7 @@ typedef struct {
     ScaleMode    cli_scale;
     int          cli_mute;      /* --mute: звук выключен, что бы ни стояло в настройках */
     int          W, H, s;                 /* виртуальный экран и масштаб иконок */
-    int          m, tab_h, title_y, box_top, box_w, box_h, cover_w, cover_h, small_w, small_h;
+    int          m, tab_h, title_y, box_top, box_w, box_h, cover_w, cover_h;
     int          top_min, bottom_max, lib_title_y;   /* зона контента между счётчиком и вкладками */
     int          cell_w, cell_h, cols, gap;
     int          tab, focus_tabs;
@@ -91,7 +89,7 @@ typedef struct {
     float        cur_x, cur_y;
     uint32_t     cur_t;
     uint32_t     launch_t0;
-    uint32_t     wipe_old[2], wipe_new[2], wipe_t0;   /* смена фона: был / стал (верх, низ), начало */
+    int          hide_sel;      /* снимок для запуска «вставить картридж»: выбранный носитель не рисуем */
     unsigned     art_gen;       /* boxart_generation(): появились ли новые обложки из интернета */
 } Ui;
 
@@ -392,13 +390,6 @@ static void theme_step(Ui *ui, float dt)
     const uint32_t *b = (const uint32_t *)&target;
     int k = (int)clampf(dt * 10.0f * 256, 1, 256), i, sh;
 
-    if (target.bg_top != ui->wipe_new[0] || target.bg_bottom != ui->wipe_new[1]) {
-        ui->wipe_old[0] = ui->wipe_new[0];
-        ui->wipe_old[1] = ui->wipe_new[1];
-        ui->wipe_new[0] = target.bg_top;
-        ui->wipe_new[1] = target.bg_bottom;
-        ui->wipe_t0 = ui->wipe_old[0] ? platform_ticks_ms() : 0;   /* первый кадр — без шторки */
-    }
     for (i = 0; i < (int)(sizeof(Theme) / sizeof(uint32_t)); i++) {
         uint32_t r = 0;
         for (sh = 0; sh < 32; sh += 8) {
@@ -407,8 +398,6 @@ static void theme_step(Ui *ui, float dt)
         }
         a[i] = r;
     }
-    ui->theme.bg_top = target.bg_top;       /* фон меняет шторка, а не плавный переход */
-    ui->theme.bg_bottom = target.bg_bottom;
 }
 
 /* ---------- разметка ---------- */
@@ -451,11 +440,8 @@ static void layout(Ui *ui)
     group = ui->box_h + gap + title_h;
     ui->box_top = ui->top_min + (ui->bottom_max - ui->top_min - group) / 2;
     ui->title_y = ui->box_top + ui->box_h + gap;
-    /* носитель вписывается в область чуть шире коробки, боковые — в уменьшенную */
-    ui->cover_w = (int)((float)ui->box_w * MEDIA_WIDE);
+    ui->cover_w = ui->box_w;
     ui->cover_h = ui->box_h;
-    ui->small_w = (int)((float)ui->cover_w * SIDE_SCALE);
-    ui->small_h = (int)((float)ui->cover_h * SIDE_SCALE);
 
     /* Сетка библиотеки: минимум 3 колонки и примерно 2 ряда в видимой зоне. */
     ui->gap = imax(4, ui->W / 60);
@@ -489,49 +475,25 @@ static uint32_t bg_band(const Ui *ui, uint32_t c0, uint32_t c1, int y)
 static void draw_background(Ui *ui, int top, int bottom)
 {
     Image *s = ui->scr;
-    float p = ui->wipe_t0 ? (float)(platform_ticks_ms() - ui->wipe_t0) / WIPE_MS : 1;
     int x, y;
 
     top = imax(0, top);
     bottom = imin(ui->H, bottom);
-    if (p >= 1) {
-        ui->wipe_t0 = 0;
-        /* «ступенчатый» градиент — как на старых приставках с ограниченной палитрой */
-        for (y = top; y < bottom; y++)
-            gfx_fill(s, 0, y, ui->W, 1, bg_band(ui, ui->th->bg_top, ui->th->bg_bottom, y));
-    } else {
-        /* шторка: в каждой клетке растёт круг нового цвета, слева раньше, чем справа;
-         * круги чуть сдвинуты и разного размера — как полутоновый растр */
-        int c = imax(6, ui->H / 20);
-        for (y = top; y < bottom; y++) {
-            uint32_t on = bg_band(ui, ui->wipe_new[0], ui->wipe_new[1], y);
-            uint32_t off = bg_band(ui, ui->wipe_old[0], ui->wipe_old[1], y);
-            int cy = y / c;
-            for (x = 0; x < ui->W; x++) {
-                int cx = x / c;
-                unsigned h = (unsigned)(cx * 73856093) ^ (unsigned)(cy * 19349663);
-                float jx = (float)(h % 7) / 7 - 0.5f, jy = (float)(h / 7 % 7) / 7 - 0.5f, jr = (float)(h / 49 % 5) / 5;
-                float local = clampf(p * 2.2f - (float)x / (float)ui->W * 0.9f - jr * 0.25f, 0, 1);
-                float dx = (float)(x % c) + 0.5f - (float)c * (0.5f + jx * 0.4f);
-                float dy = (float)(y % c) + 0.5f - (float)c * (0.5f + jy * 0.4f);
-                float r = local * (float)c * 1.05f;
-                s->px[y * s->w + x] = dx * dx + dy * dy <= r * r ? on : off;
-            }
-        }
-    }
+    /* «ступенчатый» градиент — как на старых приставках с ограниченной палитрой */
+    for (y = top; y < bottom; y++)
+        gfx_fill(s, 0, y, ui->W, 1, bg_band(ui, ui->th->bg_top, ui->th->bg_bottom, y));
     /* редкая пиксельная «зернистость» */
     for (y = top + (9 - top % 6) % 6; y < bottom; y += 6)
         for (x = (y / 6) % 2 * 3; x < ui->W; x += 6)
             gfx_fill(s, x, y, 1, 1, ui->set.dark ? 0x0CFFFFFFu : 0x0A000000u);
 }
 
-/* Носитель игры в слоте x, y, w × h: вписан по высоте (шириной — до wide ширин слота),
- * стоит на нижнем крае слота и отбрасывает мягкую тень на «пол». dim — насколько он
- * растворяется в фоне (дальние). */
-static void draw_box(Ui *ui, int x, int y, int w, int h, Game *g, float wide, int dim, uint32_t now)
+/* Носитель игры в слоте x, y, w × h: стоит на нижнем крае слота, по центру, и отбрасывает
+ * тень на «пол». Пиксель носителя — MEDIA_PIXEL точек экрана, если влезает (на полке), иначе
+ * вписывается (сетка библиотеки). dim — насколько он растворяется в фоне (дальние). */
+static void draw_box(Ui *ui, int x, int y, int w, int h, Game *g, int dim, uint32_t now)
 {
     Image *s = ui->scr;
-    const Image *src = NULL;
     float aspect = media_aspect(g ? g->kind : GAME_J2ME), f;
     int dw, dh, dx, dy, k, fade = 255, tail;
     unsigned sa = ui->th->shadow >> 24;
@@ -540,21 +502,25 @@ static void draw_box(Ui *ui, int x, int y, int w, int h, Game *g, float wide, in
         aspect = (float)g->cover.w / (float)g->cover.h;
         fade = (int)clampf((float)(now - g->cover_time) * 255.0f / 300.0f, 0, 255);
     }
-    f = fminf((float)w * wide / aspect, (float)h);
-    dh = (int)f;
-    dw = (int)(f * aspect);
+    if (g && g->cover_ready && g->cover.px && g->cover.w * MEDIA_PIXEL <= w && g->cover.h * MEDIA_PIXEL <= h) {
+        dw = g->cover.w * MEDIA_PIXEL;
+        dh = g->cover.h * MEDIA_PIXEL;
+    } else {
+        f = fminf((float)w / aspect, (float)h);
+        dh = (int)f;
+        dw = (int)(f * aspect);
+    }
     dx = x + (w - dw) / 2;
     dy = y + h - dh;
-    /* тень на полу: полоса под носителем, гаснет вниз и к краям */
-    tail = imax(2, h / 14);
-    for (k = 0; k < tail; k++) {
+    /* тень на полу: ступеньками, как всё остальное */
+    tail = imax(2, h / 14) / 2 * 2;
+    for (k = 0; k < tail; k += 2) {
         unsigned a = sa * (unsigned)(tail - k) / (unsigned)(tail + 1);
-        int in = dw * k / (tail * 5);
-        gfx_fill(s, dx + in + 2, dy + dh + k, dw - 2 * in, 1, a << 24);
+        int in = (dw * k / (tail * 4)) / 2 * 2;
+        gfx_fill(s, dx + in + 2, dy + dh + k, dw - 2 * in, 2, a << 24);
     }
     if (g && g->cover_ready && g->cover.px) {
-        src = g->cover_small.px && dw <= g->cover_small.w + 1 ? &g->cover_small : &g->cover;
-        gfx_blit_scaled(s, src, dx, dy, dw, dh, fade * (255 - dim) / 255);
+        gfx_blit_scaled(s, &g->cover, dx, dy, dw, dh, fade * (255 - dim) / 255);
     } else {
         /* носитель ещё не нарисован — силуэт и бегущий блик */
         int sweep = (int)(now / 5 % (unsigned)(dw + 30)) - 15;
@@ -568,7 +534,7 @@ static void box_rect(const Ui *ui, int i, int *x, int *y, int *w, int *h, float 
 {
     float d = (float)i - ui->pos, ad = fabsf(d), near = clampf(ad, 0, 1);
     float sc = 1.0f - (1.0f - SIDE_SCALE) * near;
-    float sw = (float)ui->box_w * SIDE_SCALE, gap = (float)ui->box_w * 0.36f;
+    float sw = (float)ui->box_w * SIDE_SCALE, gap = (float)ui->box_w * 0.16f;
     float off = near * ((float)ui->box_w * 0.5f + sw * 0.5f + gap) + (ad > 1 ? (ad - 1) * (sw + gap) : 0);
     float cx = (float)ui->W / 2 + (d < 0 ? -off : off);
 
@@ -641,9 +607,11 @@ static void draw_play(Ui *ui, uint32_t now)
             box_rect(ui, i, &x, &y, &w, &h, &tilt);
             if (x > ui->W || x + w < 0)
                 continue;
+            if (i == ui->sel && ui->hide_sel)
+                continue;
             if (i == ui->sel && !ui->launch_t0)
                 y += (int)(1.5f * sinf((float)now / 650.0f));   /* коробка чуть «дышит» */
-            draw_box(ui, x, y, w, h, &ui->lib.games[i], MEDIA_WIDE, dist >= 2 ? 110 : 0, now);
+            draw_box(ui, x, y, w, h, &ui->lib.games[i], dist >= 2 ? 110 : 0, now);
         }
     }
     draw_counter(ui, ui->sel + 1, n);
@@ -692,9 +660,11 @@ static void draw_library(Ui *ui, uint32_t now)
         grid_cell(ui, i, &x, &y);
         if (y + ui->cell_h < ui->top_min - 4 || y > bottom)
             continue;
+        if (i == ui->sel && ui->hide_sel)
+            continue;
         if (i == ui->sel && !ui->focus_tabs)
             rrect(s, x - 3, y - 3 - lift, ui->cell_w + 6, ui->cell_h + 6, 2, ui->th->accent);
-        draw_box(ui, x, y - lift, ui->cell_w, ui->cell_h, &ui->lib.games[i], 1.0f, 0, now);
+        draw_box(ui, x, y - lift, ui->cell_w, ui->cell_h, &ui->lib.games[i], 0, now);
     }
     /* сетка прокручивается под заголовок и шапку — подрезаем фоном */
     draw_background(ui, 0, ui->top_min - 2);
@@ -835,7 +805,7 @@ static void draw_tabs(Ui *ui)
 
 /* ---------- анимации запуска ---------- */
 
-enum { FX_CRT, FX_WARP, FX_DRIVE, FX_SHATTER, FX_COUNT };
+enum { FX_CRT, FX_WARP, FX_DRIVE, FX_SHATTER, FX_INSERT, FX_COUNT };
 
 static uint32_t fx_seed;
 static unsigned fx_rand(void)
@@ -933,6 +903,91 @@ static void fx_flash(Image *d, float a)
 }
 
 /* Весь экран анимации запуска; t — 0..1. */
+/* Длительность анимации запуска. */
+static uint32_t launch_ms(const Ui *ui)
+{
+    return ui->fx == FX_SHATTER ? 3300 : ui->fx == FX_INSERT ? 1500 : 1700;
+}
+
+/* Переход «вжух»: чёрные круги растут справа налево, каждый в своей клетке, чуть сдвинут
+ * и со своим запаздыванием — как полутоновый растр; p 0..1, при 1 экран чёрный. */
+static void fx_dots(Ui *ui, float p)
+{
+    Image *s = ui->scr;
+    int c = imax(6, ui->H / 14), x, y;
+
+    if (p <= 0)
+        return;
+    for (y = 0; y < ui->H; y++) {
+        int cy = y / c;
+        for (x = 0; x < ui->W; x++) {
+            int cx = x / c;
+            unsigned h = (unsigned)(cx * 73856093) ^ (unsigned)(cy * 19349663);
+            float jx = (float)(h % 7) / 7 - 0.5f, jy = (float)(h / 7 % 7) / 7 - 0.5f, jr = (float)(h / 49 % 5) / 5;
+            float local = clampf(p * 2.2f - (1 - (float)x / (float)ui->W) * 0.9f - jr * 0.3f, 0, 1);
+            float dx = (float)(x % c) + 0.5f - (float)c * (0.5f + jx * 0.4f);
+            float dy = (float)(y % c) + 0.5f - (float)c * (0.5f + jy * 0.4f);
+            float r = local * (float)c * 1.05f;
+            if (dx * dx + dy * dy <= r * r)
+                s->px[y * s->w + x] = 0xFF000000u;
+        }
+    }
+}
+
+/* Запуск «вставить картридж»: снизу выезжает приставка со щелью, носитель уходит в неё,
+ * загорается лампочка, и экран справа налево заливают чёрные круги.
+ *   0–0.15     приставка поднимается, носитель чуть приподнимается;
+ *   0.15–0.47  носитель опускается в щель (с ускорением) и щёлкает;
+ *   0.47–0.55  лампочка зелёная, экран вздрагивает;
+ *   0.5–1      круги. */
+static void fx_insert(Ui *ui, float t)
+{
+    Image *s = ui->scr;
+    Game *g = &ui->lib.games[ui->sel];
+    int bx, by, bw, bh, dw, dh, dx, dy, plate_h = ui->tab_h + ui->H / 12, py, slot_w, shake, j;
+    float tilt, rise = smooth(t / 0.15f), lift = t < 0.15f ? sinf(t / 0.15f * 3.1416f) : 0;
+    float fall = clampf((t - 0.15f) / 0.32f, 0, 1);
+
+    if (ui->tab == TAB_LIBRARY) {
+        grid_cell(ui, ui->sel, &bx, &by);
+        bw = ui->cell_w;
+        bh = ui->cell_h;
+    } else
+        box_rect(ui, ui->sel, &bx, &by, &bw, &bh, &tilt);
+    if (g->cover_ready && g->cover.px && g->cover.w * MEDIA_PIXEL <= bw && g->cover.h * MEDIA_PIXEL <= bh) {
+        dw = g->cover.w * MEDIA_PIXEL;
+        dh = g->cover.h * MEDIA_PIXEL;
+    } else {
+        dh = bh;
+        dw = (int)((float)bh * media_aspect(g->kind));
+    }
+    /* приставка — по центру экрана, носитель встаёт над её щелью */
+    py = ui->H - (int)((float)plate_h * rise);
+    dx = (int)((float)(bx + (bw - dw) / 2) + ((float)(ui->W - dw) / 2 - (float)(bx + (bw - dw) / 2)) * smooth(t / 0.2f));
+    dy = by + bh - dh - (int)(lift * (float)(ui->H / 30)) +
+         (int)((float)(py - dh / 3 - (by + bh - dh)) * fall * fall);    /* торчит треть */
+    shake = t > 0.47f && t < 0.53f ? ((int)(t * 400) % 2 ? 1 : -1) : 0;
+
+    gfx_blit(s, &ui->snap, shake, 0, 255);
+    gfx_fill(s, 0, 0, ui->W, ui->H, (uint32_t)(smooth(t / 0.4f) * 110) << 24);   /* полка темнеет */
+    if (g->cover_ready && g->cover.px)
+        gfx_blit_scaled(s, &g->cover, dx + shake, dy, dw, dh, 255);
+    else
+        rrect(s, dx, dy, dw, dh, 3, ui->th->tab_hi);
+    /* приставка: тёмный корпус, светлая кромка, щель под носитель и лампочка */
+    slot_w = dw + 8;
+    gfx_fill(s, 0, py, ui->W, ui->H - py, 0xFF1D1C24u);
+    gfx_fill(s, 0, py, ui->W, 2, 0xFF3A3946u);
+    for (j = py + 6; j < ui->H; j += 4)
+        gfx_fill(s, ui->W / 12, j, ui->W / 6, 2, 0xFF15141Bu);
+    gfx_fill(s, (ui->W - slot_w) / 2 + shake, py - 2, slot_w, 4, 0xFF050507u);
+    gfx_fill(s, (ui->W - slot_w) / 2 + shake, py + 2, slot_w, 1, 0xFF2A2933u);
+    gfx_fill(s, ui->W - ui->W / 8, py + 8, 4, 4, t > 0.47f ? 0xFF3CE06Au : 0xFF7A1F25u);
+    if (t > 0.47f)
+        gfx_fill(s, ui->W - ui->W / 8 - 2, py + 6, 8, 8, 0x403CE06Au);
+    fx_dots(ui, (t - 0.5f) / 0.5f);
+}
+
 static void launch_fx(Ui *ui, float t, uint32_t now)
 {
     Image *s = ui->scr, *src = &ui->snap;
@@ -943,6 +998,9 @@ static void launch_fx(Ui *ui, float t, uint32_t now)
     cx = (float)bx + (float)bw / 2;
     cy = (float)by + (float)bh / 2;
     switch (ui->fx) {
+    case FX_INSERT:
+        fx_insert(ui, t);
+        break;
     case FX_CRT: {
         /* коробка наезжает на весь экран → мозаика → кинескоп схлопывается в полоску и точку */
         float z = smooth(t / 0.35f);
@@ -1229,7 +1287,7 @@ static void start_launch(Ui *ui, uint32_t now)
 
 static void draw_launch_overlay(Ui *ui, uint32_t now)
 {
-    float launch = (float)(now - ui->launch_t0) / LAUNCH_MS;
+    float launch = (float)(now - ui->launch_t0) / (float)launch_ms(ui);
     unsigned a = (unsigned)(clampf((launch - 0.4f) / 0.35f, 0, 1) * 255);
     int r = imin(ui->W, ui->H) / 6, i;
 
@@ -1256,7 +1314,7 @@ static int run_game(Ui *ui, Game *g)
     MidpResult r;
     uint32_t until;
 
-    if (ui->fx == FX_SHATTER)
+    if (ui->fx == FX_SHATTER || ui->fx == FX_INSERT)
         platform_fade_in(700);     /* анимация ушла в черноту — игра из неё проявляется */
     platform_cursor_mode(0);        /* в игре стик снова крестовина, указатель — системный */
     r = g->kind == GAME_NES ? nes_run(g->path, g->base, mode, err, sizeof(err))
@@ -1332,7 +1390,6 @@ static void load_covers(Ui *ui, uint32_t now)
         Game *g = &ui->lib.games[d];
         if (g->cover_ready && (d < ui->sel - KEEP_COVERS || d > ui->sel + KEEP_COVERS)) {
             image_free(&g->cover);
-            image_free(&g->cover_small);
             g->cover_ready = 0;
         }
     }
@@ -1345,9 +1402,6 @@ static void load_covers(Ui *ui, uint32_t now)
             g = &ui->lib.games[cand[c]];
             if (!g->cover_ready) {
                 library_load_cover(&ui->lib, g, ui->cover_w, ui->cover_h);
-                image_free(&g->cover_small);
-                if (g->cover.px)
-                    g->cover_small = image_resize(&g->cover, ui->small_w, ui->small_h);
                 g->cover_time = now;
                 return;
             }
@@ -2284,7 +2338,7 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
     audio_set_master(ui.cli_mute || !ui.set.sound ? 0 : 100);
     {   /* вид анимации запуска; BT_LAUNCH_ANIM — посмотреть другие */
         const char *e = getenv("BT_LAUNCH_ANIM");
-        ui.fx = e ? atoi(e) % FX_COUNT : FX_SHATTER;
+        ui.fx = e ? atoi(e) % FX_COUNT : FX_INSERT;
     }
     cfg->width = 400;
     cfg->height = 240;
@@ -2417,10 +2471,11 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
         if (ui.ce) {
             draw_cover_editor(&ui);
         } else if (ui.launch_t0 && ui.snap.px) {
-            launch_fx(&ui, (float)(now - ui.launch_t0) / (ui.fx == FX_SHATTER ? 3300 : 1700), now);
+            launch_fx(&ui, (float)(now - ui.launch_t0) / (float)launch_ms(&ui), now);
         } else {
             uint32_t l0 = ui.launch_t0;
             ui.launch_t0 = 0;           /* снимок полки — без анимации */
+            ui.hide_sel = l0 && ui.fx == FX_INSERT;
             draw_background(&ui, 0, ui.H);
             if (ui.tab == TAB_PLAY)
                 draw_play(&ui, now);
@@ -2434,6 +2489,7 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
             else if (upd_shown(&ui) && !ui.launch_t0)
                 draw_update(&ui);
             ui.launch_t0 = l0;
+            ui.hide_sel = 0;
             if (ui.launch_t0) {
                 ui.snap = image_new(ui.W, ui.H);
                 if (ui.snap.px) {
@@ -2446,7 +2502,7 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
         draw_cursor(&ui, now);
         platform_present();
 
-        if (ui.launch_t0 && now - ui.launch_t0 >= (uint32_t)(ui.fx == FX_SHATTER ? 3300 : 1700)) {
+        if (ui.launch_t0 && now - ui.launch_t0 >= launch_ms(&ui)) {
             image_free(&ui.snap);
             if (run_game(&ui, &ui.lib.games[ui.sel]))
                 running = 0;

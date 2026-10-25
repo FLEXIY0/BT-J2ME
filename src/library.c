@@ -359,7 +359,6 @@ void library_free(Library *lib)
     for (i = 0; i < lib->count; i++) {
         image_free(&lib->games[i].icon);
         image_free(&lib->games[i].cover);
-        image_free(&lib->games[i].cover_small);
     }
     free(lib->games);
     free(lib->covers);
@@ -512,8 +511,8 @@ void library_load_cover(const Library *lib, Game *g, int w, int h)
     }
     image_free(&g->cover);
     if (src.px && is_3d_box(&src)) {
-        fit((float)src.w / (float)src.h, w, h, &mw, &mh);
-        g->cover = image_resize(&src, mw, mh);
+        fit((float)src.w / (float)src.h, w / MEDIA_PIXEL, h / MEDIA_PIXEL, &mw, &mh);
+        g->cover = image_resize(&src, mw, mh);      /* тоже крупным пикселем, как свои носители */
         media_tones(&src, &g->tone_bg, &g->tone_fg);
     } else {
         memset(&m, 0, sizeof(m));
@@ -534,7 +533,7 @@ void library_load_cover(const Library *lib, Game *g, int w, int h)
         }
         g->tone_bg = m.bg;
         g->tone_fg = m.fg;
-        fit(media_aspect(g->kind), w, h, &mw, &mh);
+        fit(media_aspect(g->kind), w / MEDIA_PIXEL, h / MEDIA_PIXEL, &mw, &mh);
         g->cover = media_render(&m, mw, mh);
     }
     image_free(&src);
