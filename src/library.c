@@ -1,5 +1,7 @@
 #define _DEFAULT_SOURCE
 #include "library.h"
+#include "boxart.h"
+#include "media.h"
 #include "jar.h"
 #include "manifest.h"
 #include "png.h"
@@ -278,9 +280,64 @@ static void scan_dir(Library *lib, int *cap, const char *dir, int depth)
     free(tracks);
 }
 
+/* Имена картинок в covers/ — к ним игры подбираются по названию. */
+static void scan_covers(Library *lib)
+{
+    char path[1100];
+    const char *n;
+    BtDir *d;
+    int cap = 0;
+
+    snprintf(path, sizeof(path), "%s/covers", lib->dir);
+    if (!(d = bt_dir_open(path)))
+        return;
+    while ((n = bt_dir_next(d)) != NULL) {
+        size_t l = strlen(n);
+        if (l < 5 || l - 4 >= 256 || !has_ext(n, ".png"))
+            continue;
+        if (lib->ncovers == cap) {
+            char (*nc)[256] = realloc(lib->covers, (size_t)(cap = cap ? cap * 2 : 64) * 256);
+            if (!nc)
+                break;
+            lib->covers = nc;
+        }
+        memcpy(lib->covers[lib->ncovers], n, l - 4);
+        lib->covers[lib->ncovers++][l - 4] = '\0';
+    }
+    bt_dir_close(d);
+}
+
+/* Своя обложка: <имя>.png рядом с игрой, в корне полки, в covers/ — или похожее имя в covers/. */
+static int own_cover(const Library *lib, const Game *g, char *path, size_t cap)
+{
+    const char **names;
+    int i;
+
+    snprintf(path, cap, "%.*s.png", (int)(strlen(g->path) - 4), g->path);
+    if (bt_file_size(path) > 0)
+        return 1;
+    snprintf(path, cap, "%s/%s.png", lib->dir, g->base);
+    if (bt_file_size(path) > 0)
+        return 1;
+    snprintf(path, cap, "%s/covers/%s.png", lib->dir, g->base);
+    if (bt_file_size(path) > 0)
+        return 1;
+    if (!lib->ncovers || !(names = malloc(sizeof(char *) * (size_t)lib->ncovers)))
+        return 0;
+    for (i = 0; i < lib->ncovers; i++)
+        names[i] = lib->covers[i];
+    i = boxart_match(names, lib->ncovers, g->base, g->name);
+    free(names);
+    if (i < 0)
+        return 0;
+    snprintf(path, cap, "%s/covers/%s.png", lib->dir, lib->covers[i]);
+    return 1;
+}
+
 int library_scan(Library *lib, const char *dir)
 {
-    int cap = 0;
+    char path[1400];
+    int cap = 0, i;
 
     memset(lib, 0, sizeof(*lib));
     copy_str(lib->dir, sizeof(lib->dir), dir);
@@ -289,6 +346,9 @@ int library_scan(Library *lib, const char *dir)
     scan_dir(lib, &cap, dir, 0);
     if (lib->count)
         qsort(lib->games, (size_t)lib->count, sizeof(Game), by_name);
+    scan_covers(lib);
+    for (i = 0; i < lib->count; i++)
+        lib->games[i].cover_own = own_cover(lib, &lib->games[i], path, sizeof(path));
     return 0;
 }
 
@@ -302,6 +362,7 @@ void library_free(Library *lib)
         image_free(&lib->games[i].cover_small);
     }
     free(lib->games);
+    free(lib->covers);
     memset(lib, 0, sizeof(*lib));
 }
 
@@ -333,7 +394,6 @@ static uint32_t hsv(unsigned h, unsigned s, unsigned v)   /* h 0..359, s/v 0..25
 
 /* Обложка без надписей: цветной фон по хэшу названия, полиграфическая штриховка,
  * «логотип-овал» сверху и крупная пиксельная иконка игры (или диск, если иконки нет). */
-static int imax(int a, int b) { return a > b ? a : b; }
 
 /* Диск PS1: тёмная рабочая сторона с фиолетово-синим отливом, прозрачное кольцо у центра;
  * у PS2 (ps2) — синяя, как у их DVD и CD. */
@@ -402,15 +462,7 @@ static Image make_cover(const Game *g, int w, int h)
         gfx_fill(&c, ix + 2, iy + 3, iw, ih, 0x40000000u);
         gfx_blit_scaled(&c, &g->icon, ix, iy, iw, ih, 255);
     } else if (g->kind == GAME_NES) {
-        /* картридж: серый корпус, цветная наклейка, рёбра снизу */
-        int cw = w * 3 / 5, ch = cw * 11 / 10, cx = (w - cw) / 2, cy = band + (h - band - ch) / 2, i;
-        gfx_fill(&c, cx + 3, cy + 4, cw, ch, 0x40000000u);
-        gfx_fill(&c, cx, cy, cw, ch, 0xFF8E8C96u);
-        gfx_fill(&c, cx, cy, cw, 2, 0xFFB4B2BCu);
-        gfx_fill(&c, cx + cw / 8, cy + ch / 8, cw * 3 / 4, ch / 2, hsv((hue + 180) % 360, 140, 220));
-        gfx_fill(&c, cx + cw / 8, cy + ch / 8, cw * 3 / 4, ch / 12, 0x50FFFFFFu);
-        for (i = 0; i < 5; i++)
-            gfx_fill(&c, cx + cw / 6 + i * (cw * 2 / 3) / 5, cy + ch * 3 / 4, imax(1, cw / 24), ch / 6, 0xFF6C6A74u);
+        /* наклейка картриджа: только цвет и «шапка» — сам картридж рисует media.c */
     } else if (g->kind == GAME_PSX || g->kind == GAME_PS2) {
         psx_disc(&c, w / 2, band + (h - band) / 2, w * 3 / 8, hue, g->kind == GAME_PS2);
     } else {
@@ -421,57 +473,71 @@ static Image make_cover(const Game *g, int w, int h)
     return c;
 }
 
-/* Вырезает из картинки центральную часть нужных пропорций — обложка заполняет бокс без искажений. */
-static Image crop_to_aspect(const Image *src, int w, int h)
+/* Картинка с прозрачными углами — уже готовая объёмная коробка (пакеты 3D Boxes). */
+static int is_3d_box(const Image *im)
 {
-    int cw = src->w, ch = src->w * h / w, x0, y0, y;
-    Image out;
+    return im->w > 4 && im->h > 4 && (im->px[0] >> 24) < 128 && (im->px[im->w - 1] >> 24) < 128 &&
+           (im->px[(im->h - 1) * im->w] >> 24) < 128;
+}
 
-    if (ch > src->h) {
-        ch = src->h;
-        cw = src->h * w / h;
+/* Вписать пропорции aspect в w × h. */
+static void fit(float aspect, int w, int h, int *ow, int *oh)
+{
+    *ow = w;
+    *oh = (int)((float)w / aspect + 0.5f);
+    if (*oh > h) {
+        *oh = h;
+        *ow = (int)((float)h * aspect + 0.5f);
     }
-    x0 = (src->w - cw) / 2;
-    y0 = (src->h - ch) / 2;
-    out = image_new(cw, ch);
-    for (y = 0; out.px && y < ch; y++)
-        memcpy(out.px + (size_t)y * cw, src->px + (size_t)(y0 + y) * src->w + x0, (size_t)cw * sizeof(uint32_t));
-    return out;
 }
 
 void library_load_cover(const Library *lib, Game *g, int w, int h)
 {
     char path[1400];
-    Image src = { NULL, 0, 0 };
+    Image src = { NULL, 0, 0 }, gen = { NULL, 0, 0 };
+    Media m;
+    int mw, mh;
 
-    /* обложка рядом с игрой (в её папке), потом — в корне полки и в covers */
-    snprintf(path, sizeof(path), "%.*s.png", (int)(strlen(g->path) - 4), g->path);
-    src = load_png_file(path);
-    if (!src.px) {
-        snprintf(path, sizeof(path), "%s/%s.png", lib->dir, g->base);
+    if (own_cover(lib, g, path, sizeof(path)))
         src = load_png_file(path);
-    }
+    g->cover_custom = src.px != NULL;
+    if (!src.px && boxart_cached(g->kind, g->base, path, sizeof(path)) && (src = load_png_file(path)).px)
+        g->cover_custom = 2;
     if (!src.px) {
-        snprintf(path, sizeof(path), "%s/covers/%s.png", lib->dir, g->base);
-        src = load_png_file(path);
-    }
-    if (!src.px) {
-        /* своей обложки нет — заставка «нажмите, чтобы играть», снятая при первом запуске */
+        /* обложки нет — заставка «нажмите, чтобы играть», снятая при первом запуске */
         char data[800];
         bt_data_dir(data, sizeof(data));
         snprintf(path, sizeof(path), "%s/shots/%s/title.png", data, g->base);
         src = load_png_file(path);
     }
     image_free(&g->cover);
-    if (src.px) {
-        Image crop = crop_to_aspect(&src, w, h);
-        g->cover = image_resize(crop.px ? &crop : &src, w, h);
-        image_free(&crop);
-        g->cover_custom = 1;
-        image_free(&src);
+    if (src.px && is_3d_box(&src)) {
+        fit((float)src.w / (float)src.h, w, h, &mw, &mh);
+        g->cover = image_resize(&src, mw, mh);
+        media_tones(&src, &g->tone_bg, &g->tone_fg);
     } else {
-        g->cover = make_cover(g, w, h);
-        g->cover_custom = 0;
+        memset(&m, 0, sizeof(m));
+        m.kind = g->kind;
+        m.title = g->name;
+        if (!src.px && g->kind != GAME_J2ME)
+            gen = make_cover(g, 160, (int)(160.0f / media_front_aspect(g->kind)));
+        m.front = src.px ? &src : gen.px ? &gen : NULL;
+        m.icon = &g->icon;
+        if (m.front)
+            media_tones(m.front, &m.bg, &m.fg);
+        else if (g->icon.px)
+            media_tones(&g->icon, &m.bg, &m.fg);
+        else {
+            uint32_t hue = name_hash(g->name) % 360;
+            m.bg = hsv(hue, 150, 150);
+            m.fg = hsv((hue + 40) % 360, 170, 230);
+        }
+        g->tone_bg = m.bg;
+        g->tone_fg = m.fg;
+        fit(media_aspect(g->kind), w, h, &mw, &mh);
+        g->cover = media_render(&m, mw, mh);
     }
+    image_free(&src);
+    image_free(&gen);
     g->cover_ready = 1;
 }

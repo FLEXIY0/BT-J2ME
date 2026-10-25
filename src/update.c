@@ -24,6 +24,7 @@
 #define API_URL   "https://api.github.com/repos/FLEXIY0/BT-J2ME/releases/latest"
 #define DL_PREFIX "https://github.com/FLEXIY0/BT-J2ME/releases/download/"
 #define CORE_PREFIX "https://buildbot.libretro.com/nightly/"   /* ядра приставок (update_fetch) */
+#define ART_PREFIX  "https://thumbnails.libretro.com/"          /* обложки игр (boxart_net.c) */
 
 /* Где есть готовый файл в выпуске: Windows x64, Android, Linux x86_64. */
 #if defined(_WIN64) || defined(__ANDROID__) || (defined(__linux__) && defined(__x86_64__))
@@ -109,7 +110,8 @@ static int url_ok(const char *u)
 {
     const char *p;
 
-    if (strncmp(u, DL_PREFIX, strlen(DL_PREFIX)) && strncmp(u, CORE_PREFIX, strlen(CORE_PREFIX)))
+    if (strncmp(u, DL_PREFIX, strlen(DL_PREFIX)) && strncmp(u, CORE_PREFIX, strlen(CORE_PREFIX)) &&
+        strncmp(u, ART_PREFIX, strlen(ART_PREFIX)))
         return 0;
     for (p = u; *p; p++)
         if (!isalnum((unsigned char)*p) && !strchr(":/._-~%+", *p))

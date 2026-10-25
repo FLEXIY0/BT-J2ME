@@ -15,10 +15,12 @@ typedef struct {
     char     name[128], vendor[128], version[32], profile[32];
     long long size;
     Image    icon;          /* иконка MIDlet из JAR, может быть пустой */
-    Image    cover;         /* готовая обложка размера cover_w × cover_h */
-    Image    cover_small;   /* она же для боковых боксов: уменьшена с усреднением, без «рваного» текста */
+    Image    cover;         /* носитель с обложкой (media.h), фон прозрачный; вписан в заданную область */
+    Image    cover_small;   /* он же для боковых боксов: уменьшен с усреднением, без «рваного» текста */
     int      cover_ready;
-    int      cover_custom;  /* 1 — из файла, 0 — собрана автоматически */
+    int      cover_custom;  /* 1 — своя картинка, 2 — скачанная, 0 — собрана автоматически */
+    int      cover_own;     /* своя картинка в папке игр — из интернета не качаем */
+    uint32_t tone_bg, tone_fg;  /* два цвета игры по обложке: фон полки и акцент */
     uint32_t cover_time;    /* когда загрузилась — для плавного появления */
 } Game;
 
@@ -26,6 +28,8 @@ typedef struct {
     char  dir[1024];
     Game *games;
     int   count;
+    char (*covers)[256];    /* картинки из covers/ без .png: подбираются к играм по названию */
+    int   ncovers;
 } Library;
 
 int  library_scan(Library *lib, const char *dir);
@@ -33,7 +37,9 @@ int  library_scan(Library *lib, const char *dir);
 int  library_cue_files(const char *cue_path, char (*out)[256], int max);
 void library_free(Library *lib);
 
-/* Ищет <имя>.png рядом с JAR или в covers/<имя>.png; если нет — рисует обложку сама. */
+/* Носитель игры, вписанный в w × h. Обложка: <имя>.png рядом с игрой или в covers/ (там и
+ * похожее имя, например из пакета объёмных коробок — тогда она показывается как есть), потом
+ * скачанная из libretro, потом заставка игры; иначе рисуется сама. Заодно — цвета игры. */
 void library_load_cover(const Library *lib, Game *g, int w, int h);
 
 #endif

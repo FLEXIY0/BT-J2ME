@@ -5,6 +5,7 @@ BIN=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 DIR=$(cd "$(dirname "$0")" && pwd)
 OUT="$DIR/out"
 fails=0
+export BT_NO_BOXART=1   # полка в тестах не ходит за обложками в интернет
 
 check() { # имя, ожидаемый код, фраза в выводе, команда...
     name=$1 want=$2 pat=$3
@@ -62,6 +63,8 @@ else
         check "пустая полка" 124 "" env SDL_VIDEODRIVER=dummy timeout 2 "$BIN" "$OUT/empty" --windowed
     fi
 fi
+
+check "обложки: подбор по названию, носители" 0 "BOXART DONE fails=0" "$DIR/boxart_test"
 
 # PlayStation: проверочный диск на встроенном HLE-BIOS — картинка, кнопки, сохранения, звук
 DISC="$OUT/psx/shelf/PS1/Test Disc"     # полка смотрит и во вложенные папки

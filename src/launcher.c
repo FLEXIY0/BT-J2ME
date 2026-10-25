@@ -11,6 +11,8 @@
 #include "audio.h"
 #include "cursor.h"
 #include "update.h"
+#include "boxart.h"
+#include "media.h"
 #include "util.h"
 #include "version.h"
 
@@ -29,6 +31,8 @@
 #define KEEP_COVERS  24     /* обложки дальше этого от выбранной выгружаем — память важнее */
 #define BOX_ASPECT   0.72f  /* коробка как у игр для приставок: ширина / высота */
 #define SIDE_SCALE   0.84f
+#define WIPE_MS      650    /* фон новой игры наползает кругами слева направо */
+#define MEDIA_WIDE   1.3f   /* носитель может быть шире коробки: коробка компакт-диска, картридж */
 
 enum { TAB_LIBRARY, TAB_PLAY, TAB_SETTINGS, TAB_COUNT };
 enum { SET_THEME, SET_PIXELS, SET_SHARP, SET_SOUND, SET_FULL, SET_COUNT };
@@ -56,7 +60,8 @@ typedef struct {
 typedef struct {
     Library      lib;
     Image       *scr;
-    const Theme *th;
+    const Theme *th;            /* = &theme: цвета выбранной игры, плавно перетекают */
+    Theme        theme;
     Settings     set;
     char         set_path[1024];
     ScaleMode    cli_scale;
@@ -86,6 +91,8 @@ typedef struct {
     float        cur_x, cur_y;
     uint32_t     cur_t;
     uint32_t     launch_t0;
+    uint32_t     wipe_old[2], wipe_new[2], wipe_t0;   /* смена фона: был / стал (верх, низ), начало */
+    unsigned     art_gen;       /* boxart_generation(): появились ли новые обложки из интернета */
 } Ui;
 
 /* ---------- пиксельные иконки ---------- */
@@ -156,6 +163,18 @@ static const Icon icon_trash = { 9, 9, {
 static const Icon icon_download = { 11, 11, {
     "....###....", "....###....", "....###....", "....###....", ".#########.",
     "..#######..", "...#####...", "....###....", ".....#.....", "...........", "###########" } };
+/* значок вкладки полки — носитель выбранной игры */
+static const Icon icon_sd = { 9, 11, {
+    "#######..", "#.#.#.##.", "#.#.#.###", "#########", "##.....##", "##.....##",
+    "##.....##", "##.....##", "##.....##", "#########", "#########" } };
+static const Icon icon_psx = { 12, 11, {
+    "...#####....", "...##..##...", "...##..##...", "...##..##...", "...#####....", "...##.......",
+    ".####.#####.", "##.##.......", ".#########..", "........###.", "#########..." } };
+static const Icon icon_nes = { 15, 7, {
+    "###############", "#.............#", "#..#......##..#", "#.###.##.#..#.#",
+    "#..#......##..#", "#.............#", "###############" } };
+static const Icon icon_ps2 = { 14, 5, {
+    "####.####.####", "#..#.#.......#", "####.####.####", "#.......#.#...", "#....####.####" } };
 static const Icon icon_camera = { 11, 9, {
     "...###.....", "###########", "#...###...#", "#..#...#..#", "#..#...#..#",
     "#..#...#..#", "#...###...#", "###########", "..........." } };
@@ -303,21 +322,104 @@ static void settings_save(const Ui *ui)
     fclose(f);
 }
 
-/* ---------- разметка ---------- */
+/* ---------- цвета игры ---------- */
 
-static void cover_area(int w, int h, int *cw, int *ch)
+static uint32_t hsvf(float h, float sa, float v)
 {
-    int rim = w >= 40 ? 2 : 1;
+    float c = v * sa, hp = fmodf(h, 360) / 60, xx = c * (1 - fabsf(fmodf(hp, 2) - 1)), m = v - c, r, g, b;
 
-    *cw = w - rim * 2;
-    *ch = h - rim * 2;
+    if (hp < 1)      { r = c;  g = xx; b = 0; }
+    else if (hp < 2) { r = xx; g = c;  b = 0; }
+    else if (hp < 3) { r = 0;  g = c;  b = xx; }
+    else if (hp < 4) { r = 0;  g = xx; b = c; }
+    else if (hp < 5) { r = xx; g = 0;  b = c; }
+    else             { r = c;  g = 0;  b = xx; }
+    return 0xFF000000u | (uint32_t)((r + m) * 255) << 16 | (uint32_t)((g + m) * 255) << 8 | (uint32_t)((b + m) * 255);
 }
+
+static void to_hsv(uint32_t c, float *h, float *sa, float *v)
+{
+    float r = (float)((c >> 16) & 255) / 255, g = (float)((c >> 8) & 255) / 255, b = (float)(c & 255) / 255;
+    float mx = fmaxf(r, fmaxf(g, b)), mn = fminf(r, fminf(g, b)), d = mx - mn;
+
+    *v = mx;
+    *sa = mx > 0 ? d / mx : 0;
+    *h = d <= 0 ? 0 : mx == r ? fmodf((g - b) / d + 6, 6) * 60 : mx == g ? ((b - r) / d + 2) * 60 : ((r - g) / d + 4) * 60;
+}
+
+/* Тема из двух цветов игры: фон — оттенок основного, текст и значки — акцент. Светлая или
+ * тёмная — как в настройках. */
+static Theme game_theme(uint32_t bg, uint32_t fg, int dark)
+{
+    Theme t = dark ? theme_dark : theme_light;
+    float hb, sb, vb, hf, sf, vf;
+
+    to_hsv(bg, &hb, &sb, &vb);
+    to_hsv(fg, &hf, &sf, &vf);
+    if (sb < 0.12f) {           /* серая обложка — фон по акценту, но едва окрашенный */
+        hb = hf;
+        sb = sf * 0.4f;
+    }
+    if (sf < 0.15f)
+        hf = hb;
+    if (dark) {
+        t.bg_top = hsvf(hb, fminf(sb, 0.6f), 0.22f);
+        t.bg_bottom = hsvf(hb, fminf(sb, 0.7f), 0.08f);
+        t.text = hsvf(hf, fminf(sf, 0.25f), 0.97f);
+        t.sub = hsvf(hb, fminf(sb, 0.3f), 0.66f);
+        t.accent = hsvf(hf, fmaxf(fminf(sf, 0.75f), 0.45f), 0.98f);
+        t.tab_hi = hsvf(hb, fminf(sb, 0.5f), 0.28f);
+        t.divider = hsvf(hb, fminf(sb, 0.4f), 0.32f);
+    } else {
+        t.bg_top = hsvf(hb, fminf(sb, 0.22f), 0.97f);
+        t.bg_bottom = hsvf(hb, fminf(sb, 0.32f), 0.86f);
+        t.text = hsvf(hf, fmaxf(fminf(sf, 0.85f), 0.5f), 0.42f);
+        t.sub = hsvf(hf, fminf(sf, 0.45f), 0.56f);
+        t.accent = hsvf(hf, fmaxf(fminf(sf, 0.85f), 0.55f), 0.62f);
+        t.tab_hi = hsvf(hb, fminf(sb, 0.3f), 0.88f);
+        t.divider = hsvf(hb, fminf(sb, 0.3f), 0.80f);
+    }
+    return t;
+}
+
+/* Цвета полки тянутся к цветам выбранной игры за ~0.3 с. */
+static void theme_step(Ui *ui, float dt)
+{
+    const Game *g = ui->lib.count ? &ui->lib.games[ui->sel] : NULL;
+    Theme target = g && g->cover_ready ? game_theme(g->tone_bg, g->tone_fg, ui->set.dark)
+                 : g ? ui->theme : ui->set.dark ? theme_dark : theme_light;
+    uint32_t *a = (uint32_t *)&ui->theme;
+    const uint32_t *b = (const uint32_t *)&target;
+    int k = (int)clampf(dt * 10.0f * 256, 1, 256), i, sh;
+
+    if (target.bg_top != ui->wipe_new[0] || target.bg_bottom != ui->wipe_new[1]) {
+        ui->wipe_old[0] = ui->wipe_new[0];
+        ui->wipe_old[1] = ui->wipe_new[1];
+        ui->wipe_new[0] = target.bg_top;
+        ui->wipe_new[1] = target.bg_bottom;
+        ui->wipe_t0 = ui->wipe_old[0] ? platform_ticks_ms() : 0;   /* первый кадр — без шторки */
+    }
+    for (i = 0; i < (int)(sizeof(Theme) / sizeof(uint32_t)); i++) {
+        uint32_t r = 0;
+        for (sh = 0; sh < 32; sh += 8) {
+            int ca = (int)((a[i] >> sh) & 255), cb = (int)((b[i] >> sh) & 255), d = (cb - ca) * k / 256;
+            r |= (uint32_t)(ca + (d ? d : cb > ca ? 1 : cb < ca ? -1 : 0)) << sh;
+        }
+        a[i] = r;
+    }
+    ui->theme.bg_top = target.bg_top;       /* фон меняет шторка, а не плавный переход */
+    ui->theme.bg_bottom = target.bg_bottom;
+}
+
+/* ---------- разметка ---------- */
 
 static void layout(Ui *ui)
 {
     int dw, dh, target, k, i, old_w = ui->cover_w, old_h = ui->cover_h, region, title_h, gap, group;
 
-    ui->th = ui->set.dark ? &theme_dark : &theme_light;
+    if (!ui->th)
+        ui->theme = ui->set.dark ? theme_dark : theme_light;
+    ui->th = &ui->theme;
     platform_display_size(&dw, &dh);
     /* Короткая сторона экрана ≈ target пикселей, множитель — целый: весь экран без полей. */
     target = ui->set.big_pixels ? 190 : 270;
@@ -349,9 +451,11 @@ static void layout(Ui *ui)
     group = ui->box_h + gap + title_h;
     ui->box_top = ui->top_min + (ui->bottom_max - ui->top_min - group) / 2;
     ui->title_y = ui->box_top + ui->box_h + gap;
-    cover_area(ui->box_w, ui->box_h, &ui->cover_w, &ui->cover_h);
-    cover_area((int)((float)ui->box_w * SIDE_SCALE), (int)((float)ui->box_h * SIDE_SCALE),
-               &ui->small_w, &ui->small_h);
+    /* носитель вписывается в область чуть шире коробки, боковые — в уменьшенную */
+    ui->cover_w = (int)((float)ui->box_w * MEDIA_WIDE);
+    ui->cover_h = ui->box_h;
+    ui->small_w = (int)((float)ui->cover_w * SIDE_SCALE);
+    ui->small_h = (int)((float)ui->cover_h * SIDE_SCALE);
 
     /* Сетка библиотеки: минимум 3 колонки и примерно 2 ряда в видимой зоне. */
     ui->gap = imax(4, ui->W / 60);
@@ -369,22 +473,51 @@ static void layout(Ui *ui)
 
 /* ---------- фон и коробки ---------- */
 
+/* Ступенчатый градиент фона: цвет полосы для строки y. */
+static uint32_t bg_band(const Ui *ui, uint32_t c0, uint32_t c1, int y)
+{
+    int bands = 10, i = imin(bands - 1, y * bands / imax(1, ui->H)), sh;
+    uint32_t c = 0xFF000000u;
+
+    for (sh = 0; sh < 24; sh += 8) {
+        int a = (int)((c0 >> sh) & 255), b = (int)((c1 >> sh) & 255);
+        c |= (uint32_t)(a + (b - a) * i / (bands - 1)) << sh;
+    }
+    return c;
+}
+
 static void draw_background(Ui *ui, int top, int bottom)
 {
     Image *s = ui->scr;
-    int bands = 10, i, x, y;
+    float p = ui->wipe_t0 ? (float)(platform_ticks_ms() - ui->wipe_t0) / WIPE_MS : 1;
+    int x, y;
 
-    /* «ступенчатый» градиент — как на старых приставках с ограниченной палитрой */
-    for (i = 0; i < bands; i++) {
-        uint32_t c = 0xFF000000u;
-        int sh, y0 = imax(top, ui->H * i / bands), y1 = imin(bottom, ui->H * (i + 1) / bands);
-        if (y1 <= y0)
-            continue;
-        for (sh = 0; sh < 24; sh += 8) {
-            int a = (int)((ui->th->bg_top >> sh) & 255), b = (int)((ui->th->bg_bottom >> sh) & 255);
-            c |= (uint32_t)(a + (b - a) * i / (bands - 1)) << sh;
+    top = imax(0, top);
+    bottom = imin(ui->H, bottom);
+    if (p >= 1) {
+        ui->wipe_t0 = 0;
+        /* «ступенчатый» градиент — как на старых приставках с ограниченной палитрой */
+        for (y = top; y < bottom; y++)
+            gfx_fill(s, 0, y, ui->W, 1, bg_band(ui, ui->th->bg_top, ui->th->bg_bottom, y));
+    } else {
+        /* шторка: в каждой клетке растёт круг нового цвета, слева раньше, чем справа;
+         * круги чуть сдвинуты и разного размера — как полутоновый растр */
+        int c = imax(6, ui->H / 20);
+        for (y = top; y < bottom; y++) {
+            uint32_t on = bg_band(ui, ui->wipe_new[0], ui->wipe_new[1], y);
+            uint32_t off = bg_band(ui, ui->wipe_old[0], ui->wipe_old[1], y);
+            int cy = y / c;
+            for (x = 0; x < ui->W; x++) {
+                int cx = x / c;
+                unsigned h = (unsigned)(cx * 73856093) ^ (unsigned)(cy * 19349663);
+                float jx = (float)(h % 7) / 7 - 0.5f, jy = (float)(h / 7 % 7) / 7 - 0.5f, jr = (float)(h / 49 % 5) / 5;
+                float local = clampf(p * 2.2f - (float)x / (float)ui->W * 0.9f - jr * 0.25f, 0, 1);
+                float dx = (float)(x % c) + 0.5f - (float)c * (0.5f + jx * 0.4f);
+                float dy = (float)(y % c) + 0.5f - (float)c * (0.5f + jy * 0.4f);
+                float r = local * (float)c * 1.05f;
+                s->px[y * s->w + x] = dx * dx + dy * dy <= r * r ? on : off;
+            }
         }
-        gfx_fill(s, 0, y0, ui->W, y1 - y0, c);
     }
     /* редкая пиксельная «зернистость» */
     for (y = top + (9 - top % 6) % 6; y < bottom; y += 6)
@@ -392,122 +525,42 @@ static void draw_background(Ui *ui, int top, int bottom)
             gfx_fill(s, x, y, 1, 1, ui->set.dark ? 0x0CFFFFFFu : 0x0A000000u);
 }
 
-/* Геометрия столбца коробки: торец или лицевая сторона, верх и высота.
- * Коробки повёрнуты «корешком» к центру: ближний край — внутренний, дальний (ниже) — внешний,
- * а со стороны центра виден тёмный торец. У центральной торец чуть виден слева. */
-typedef struct {
-    int   x, w, depth, face_x, face_w;
-    float tilt, at;
-} BoxGeom;
-
-static void box_geom(BoxGeom *b, int x, int w, float tilt)
-{
-    b->x = x;
-    b->w = w;
-    b->tilt = tilt;
-    b->at = fabsf(tilt) < 0.02f ? 0 : fabsf(tilt);
-    b->depth = imax(2, (int)((float)w * (0.035f + 0.04f * b->at)));
-    if (tilt < -0.02f) {                 /* левая коробка: торец справа */
-        b->face_x = x;
-        b->face_w = w - b->depth;
-    } else if (tilt > 0.02f) {           /* правая: торец слева */
-        b->face_x = x + b->depth;
-        b->face_w = w - b->depth;
-    } else {
-        b->face_x = x + b->depth / 2;
-        b->face_w = w - b->depth / 2;
-    }
-}
-
-/* 1 — лицевая сторона, 0 — торец; *ch — высота столбца при полной высоте h. */
-static int box_column(const BoxGeom *b, int px, int h, int *ch)
-{
-    if (px >= b->face_x && px < b->face_x + b->face_w) {
-        float t = (float)(px - b->face_x) / (float)b->face_w;
-        float outer = b->tilt < 0 ? 1 - t : t;            /* 1 у внешнего (дальнего) края */
-        *ch = (int)((float)h * (1 - 0.07f * b->at * outer));
-        return 1;
-    } else {
-        float u = px < b->face_x ? (float)(b->face_x - px) / (float)imax(1, b->face_x - b->x)
-                                 : (float)(px - (b->face_x + b->face_w - 1)) / (float)imax(1, b->depth);
-        *ch = (int)((float)h * (1 - 0.06f * u));
-        return 0;
-    }
-}
-
-/* Коробка с обложкой. tilt -1..1 — насколько она сбоку от центра. */
-static void draw_box(Ui *ui, int x, int y, int w, int h, Game *g, float tilt, int dim, uint32_t now)
+/* Носитель игры в слоте x, y, w × h: вписан по высоте (шириной — до wide ширин слота),
+ * стоит на нижнем крае слота и отбрасывает мягкую тень на «пол». dim — насколько он
+ * растворяется в фоне (дальние). */
+static void draw_box(Ui *ui, int x, int y, int w, int h, Game *g, float wide, int dim, uint32_t now)
 {
     Image *s = ui->scr;
     const Image *src = NULL;
-    BoxGeom b;
-    int rim = w >= 40 ? 2 : 1, fade = 255, i, j, pass;
+    float aspect = media_aspect(g ? g->kind : GAME_J2ME), f;
+    int dw, dh, dx, dy, k, fade = 255, tail;
     unsigned sa = ui->th->shadow >> 24;
 
     if (g && g->cover_ready && g->cover.px) {
-        src = g->cover_small.px && w <= g->cover_small.w + rim * 2 + 1 ? &g->cover_small : &g->cover;
+        aspect = (float)g->cover.w / (float)g->cover.h;
         fade = (int)clampf((float)(now - g->cover_time) * 255.0f / 300.0f, 0, 255);
     }
-    box_geom(&b, x, w, tilt);
-
-    for (pass = 0; pass < 2; pass++) {
-        for (i = 0; i < w; i++) {
-            int px = x + i, ch, cy, face = box_column(&b, px, h, &ch), edge;
-
-            cy = y + (h - ch) / 2;
-            if (pass == 0) {
-                /* тень: сдвинута вниз-вправо и мягко тянется по «полу» */
-                int k, tail = imax(2, h / 16);
-                gfx_fill(s, px + 2, cy + 3, 1, ch, ui->th->shadow);
-                for (k = 0; k < tail; k++)
-                    gfx_fill(s, px + 2, cy + ch + 3 + k, 1, 1, (sa * (unsigned)(tail - k) / (unsigned)(tail + 1)) << 24);
-                continue;
-            }
-            /* скруглённые пиксельные углы */
-            edge = i == 0 || i == w - 1 || (face && (px == b.face_x || px == b.face_x + b.face_w - 1));
-            if (edge) {
-                cy += 1;
-                ch -= 2;
-            }
-            if (!face) {
-                gfx_fill(s, px, cy + 1, 1, ch - 2, ui->th->rim);
-                gfx_fill(s, px, cy + 1, 1, 1, ui->th->rim_hi);
-                continue;
-            }
-            if (px < b.face_x + rim || px >= b.face_x + b.face_w - rim) {
-                gfx_fill(s, px, cy, 1, ch, ui->th->rim);
-                continue;
-            }
-            gfx_fill(s, px, cy, 1, rim, ui->th->rim);
-            gfx_fill(s, px, cy + ch - rim, 1, rim, ui->th->rim);
-            if (src) {
-                int sx = imin(src->w - 1, (px - b.face_x - rim) * src->w / imax(1, b.face_w - 2 * rim));
-                int inner = ch - 2 * rim;
-                for (j = 0; j < inner; j++) {
-                    int py = cy + rim + j;
-                    uint32_t p = src->px[(j * src->h / inner) * src->w + sx] | 0xFF000000u;
-                    if (py >= 0 && py < s->h && px >= 0 && px < s->w)
-                        s->px[py * s->w + px] = fade >= 255 ? p : gfx_mix(s->px[py * s->w + px], p, (unsigned)fade);
-                }
-            } else {
-                /* обложка ещё не загрузилась — бежит блик */
-                int sweep = (int)(now / 5 % (unsigned)(b.face_w + 30)) - 15;
-                gfx_fill(s, px, cy + rim, 1, ch - 2 * rim, 0xFF3A3F4Cu);
-                if (px - b.face_x >= sweep && px - b.face_x < sweep + 8)
-                    gfx_fill(s, px, cy + rim, 1, ch - 2 * rim, 0x30FFFFFFu);
-            }
-            /* блик на пластике: светлая кромка сверху и косая полоса */
-            gfx_fill(s, px, cy + rim, 1, 1, 0x40FFFFFFu);
-            for (j = 0; j < ch; j++) {
-                int bx = b.face_x + b.face_w * 72 / 100 - j * 4 / 10;
-                if (px >= bx && px < bx + b.face_w / 12) {
-                    gfx_fill(s, px, cy + j, 1, 1, 0x12FFFFFFu);
-                }
-            }
-        }
+    f = fminf((float)w * wide / aspect, (float)h);
+    dh = (int)f;
+    dw = (int)(f * aspect);
+    dx = x + (w - dw) / 2;
+    dy = y + h - dh;
+    /* тень на полу: полоса под носителем, гаснет вниз и к краям */
+    tail = imax(2, h / 14);
+    for (k = 0; k < tail; k++) {
+        unsigned a = sa * (unsigned)(tail - k) / (unsigned)(tail + 1);
+        int in = dw * k / (tail * 5);
+        gfx_fill(s, dx + in + 2, dy + dh + k, dw - 2 * in, 1, a << 24);
     }
-    if (dim > 0)
-        gfx_fill(s, x, y, w, h, ((uint32_t)dim << 24) | (ui->set.dark ? 0x000000u : 0xF4EDEDu));
+    if (g && g->cover_ready && g->cover.px) {
+        src = g->cover_small.px && dw <= g->cover_small.w + 1 ? &g->cover_small : &g->cover;
+        gfx_blit_scaled(s, src, dx, dy, dw, dh, fade * (255 - dim) / 255);
+    } else {
+        /* носитель ещё не нарисован — силуэт и бегущий блик */
+        int sweep = (int)(now / 5 % (unsigned)(dw + 30)) - 15;
+        rrect(s, dx, dy, dw, dh, 3, ui->th->tab_hi);
+        gfx_fill(s, dx + imax(0, sweep), dy + 3, imax(0, imin(8, dw - sweep)), dh - 6, 0x20FFFFFFu);
+    }
 }
 
 /* Где на экране коробка с номером i при текущей прокрутке. */
@@ -515,7 +568,7 @@ static void box_rect(const Ui *ui, int i, int *x, int *y, int *w, int *h, float 
 {
     float d = (float)i - ui->pos, ad = fabsf(d), near = clampf(ad, 0, 1);
     float sc = 1.0f - (1.0f - SIDE_SCALE) * near;
-    float sw = (float)ui->box_w * SIDE_SCALE, gap = (float)ui->box_w * 0.13f;
+    float sw = (float)ui->box_w * SIDE_SCALE, gap = (float)ui->box_w * 0.36f;
     float off = near * ((float)ui->box_w * 0.5f + sw * 0.5f + gap) + (ad > 1 ? (ad - 1) * (sw + gap) : 0);
     float cx = (float)ui->W / 2 + (d < 0 ? -off : off);
 
@@ -590,7 +643,7 @@ static void draw_play(Ui *ui, uint32_t now)
                 continue;
             if (i == ui->sel && !ui->launch_t0)
                 y += (int)(1.5f * sinf((float)now / 650.0f));   /* коробка чуть «дышит» */
-            draw_box(ui, x, y, w, h, &ui->lib.games[i], tilt, dist >= 2 ? 60 : 0, now);
+            draw_box(ui, x, y, w, h, &ui->lib.games[i], MEDIA_WIDE, dist >= 2 ? 110 : 0, now);
         }
     }
     draw_counter(ui, ui->sel + 1, n);
@@ -641,7 +694,7 @@ static void draw_library(Ui *ui, uint32_t now)
             continue;
         if (i == ui->sel && !ui->focus_tabs)
             rrect(s, x - 3, y - 3 - lift, ui->cell_w + 6, ui->cell_h + 6, 2, ui->th->accent);
-        draw_box(ui, x, y - lift, ui->cell_w, ui->cell_h, &ui->lib.games[i], 0, 0, now);
+        draw_box(ui, x, y - lift, ui->cell_w, ui->cell_h, &ui->lib.games[i], 1.0f, 0, now);
     }
     /* сетка прокручивается под заголовок и шапку — подрезаем фоном */
     draw_background(ui, 0, ui->top_min - 2);
@@ -741,10 +794,13 @@ static void draw_settings(Ui *ui)
 
 static void draw_tabs(Ui *ui)
 {
-    static const Icon *icons[TAB_COUNT] = { &icon_list, &icon_pad, &icon_gear };
+    static const Icon *const media[] = { &icon_sd, &icon_nes, &icon_psx, &icon_ps2 };
+    const Icon *icons[TAB_COUNT] = { &icon_list, &icon_pad, &icon_gear };
     Image *s = ui->scr;
     int y0 = ui->H - ui->tab_h, cw = ui->W / TAB_COUNT, i;
 
+    if (ui->lib.count)
+        icons[TAB_PLAY] = media[ui->lib.games[ui->sel].kind];
     gfx_fill(s, ui->m * 2, y0, ui->W - ui->m * 4, 1, ui->th->divider);
     for (i = 0; i < TAB_COUNT; i++) {
         const Icon *ic = icons[i];
@@ -1259,7 +1315,18 @@ static void select_game(Ui *ui, int idx)
 /* Подгружаем по одной обложке за кадр, начиная с ближайших к выбранной. */
 static void load_covers(Ui *ui, uint32_t now)
 {
+    unsigned gen = boxart_generation();
+    char path[1400];
     int d;
+
+    if (gen != ui->art_gen) {   /* скачалась обложка — перерисуем те, что были без неё */
+        ui->art_gen = gen;
+        for (d = 0; d < ui->lib.count; d++) {
+            Game *g = &ui->lib.games[d];
+            if (g->cover_ready && !g->cover_custom && boxart_cached(g->kind, g->base, path, sizeof(path)))
+                g->cover_ready = 0;
+        }
+    }
 
     for (d = 0; d < ui->lib.count; d++) {
         Game *g = &ui->lib.games[d];
@@ -1383,9 +1450,10 @@ static void shots_dir(const Game *g, char *out, size_t cap)
     snprintf(out, cap, "%s/shots/%s", data, g->base);
 }
 
+/* Кадр под лицевую сторону носителя выбранной игры. */
 static float ce_aspect(const Ui *ui)
 {
-    return (float)ui->cover_w / (float)imax(1, ui->cover_h);
+    return media_front_aspect(ui->lib.games[ui->sel].kind);
 }
 
 /* Рамка не вылезает за кадр и не больше него. */
@@ -1917,6 +1985,7 @@ static void rescan(Ui *ui, const char *games_dir)
     snprintf(keep, sizeof(keep), "%s", ui->lib.count ? ui->lib.games[ui->sel].path : "");
     library_free(&ui->lib);
     library_scan(&ui->lib, games_dir);
+    boxart_fetch(&ui->lib);
     if (!ui->lib.dir[0])
         snprintf(ui->lib.dir, sizeof(ui->lib.dir), "%s", games_dir);
     ui->sel = 0;
@@ -2230,6 +2299,7 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
         bt_mkdirs(bios);
     }
     library_scan(&ui.lib, games_dir);
+    boxart_fetch(&ui.lib);
     if (!ui.lib.dir[0])
         snprintf(ui.lib.dir, sizeof(ui.lib.dir), "%s", games_dir);
     select_imported(&ui);
@@ -2343,6 +2413,7 @@ int launcher_run(const char *games_dir, PlatformConfig *cfg)
         if (!ui.launch_t0)
             cursor_stick(&ui, dt, now);
         load_covers(&ui, now);
+        theme_step(&ui, dt);
         if (ui.ce) {
             draw_cover_editor(&ui);
         } else if (ui.launch_t0 && ui.snap.px) {

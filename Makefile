@@ -36,7 +36,8 @@ SRC := src/main.c src/jar.c src/manifest.c src/classfile.c src/png.c src/gfx.c \
        src/library.c src/launcher.c src/platform_$(BACKEND).c \
        src/jvm_core.c src/jvm_interp.c src/jvm_lib.c src/rt.c src/midp.c src/audio.c src/compat.c \
        src/nes.c src/nes_map.c src/nes_run.c src/psx_run.c src/lr_run.c src/disc.c \
-       $(if $(filter sdl2,$(BACKEND)),src/touch.c src/multitap.c src/update.c src/ps2_run.c)
+       src/boxart.c src/media.c \
+       $(if $(filter sdl2,$(BACKEND)),src/touch.c src/multitap.c src/update.c src/ps2_run.c src/boxart_net.c)
 OBJ := $(SRC:.c=.o)
 
 # ядро PlayStation (PCSX-ReARMed, GPL-2): свой набор флагов, см. third_party/pcsx_rearmed.mk
@@ -63,7 +64,10 @@ tests/ps2_test: tests/ps2_test.c src/ps2_run.o src/lr_run.o src/update.o src/jar
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/ps2_test.c src/ps2_run.o src/lr_run.o src/update.o src/jar.o src/gfx.o \
 	    src/compat.o $(LDLIBS)
 
-TEST_BINS := tests/png_dump tests/psx_test $(if $(filter sdl2,$(BACKEND)),tests/pad_test tests/ps2_test)
+tests/boxart_test: tests/boxart_test.c src/boxart.o src/media.o src/gfx.o src/compat.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/boxart_test.c src/boxart.o src/media.o src/gfx.o src/compat.o -lm
+
+TEST_BINS := tests/png_dump tests/psx_test tests/boxart_test $(if $(filter sdl2,$(BACKEND)),tests/pad_test tests/ps2_test)
 
 test: bt-j2me $(TEST_BINS)
 	BT_BACKEND=$(BACKEND) sh tests/run.sh ./bt-j2me
@@ -72,7 +76,7 @@ strip: bt-j2me
 	$(CROSS)strip -s bt-j2me
 
 clean:
-	rm -f bt-j2me bt-j2me.exe src/*.o tests/png_dump tests/pad_test tests/psx_test tests/ps2_test
+	rm -f bt-j2me bt-j2me.exe src/*.o tests/png_dump tests/pad_test tests/psx_test tests/ps2_test tests/boxart_test
 	find $(PSX_DIR) -name "*.o" -delete
 	rm -rf tests/out
 

@@ -3,6 +3,7 @@
 #include "platform.h"
 #include "ps2.h"
 #include "update.h"
+#include "boxart.h"
 #include "util.h"
 
 #include <stdio.h>
@@ -117,6 +118,8 @@ int update_fetch(const char *url, const char *path, volatile int *kbytes)
     return 0;
 }
 void update_check(void) {}
+void boxart_fetch(const Library *lib) { (void)lib; }
+unsigned boxart_generation(void) { return 0; }
 UpdState update_state(void) { return UPD_IDLE; }
 const char *update_version(void) { return ""; }
 int update_progress(void) { return 0; }
