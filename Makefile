@@ -36,7 +36,7 @@ SRC := src/main.c src/jar.c src/manifest.c src/classfile.c src/png.c src/gfx.c \
        src/library.c src/launcher.c src/platform_$(BACKEND).c \
        src/jvm_core.c src/jvm_interp.c src/jvm_lib.c src/rt.c src/midp.c src/audio.c src/compat.c \
        src/nes.c src/nes_map.c src/nes_run.c src/psx_run.c src/lr_run.c src/disc.c \
-       src/boxart.c src/media.c src/ttf.c src/shelf.c src/stats.c \
+       src/boxart.c src/media.c src/ttf.c src/shelf.c src/stats.c src/crt.c \
        $(if $(filter sdl2,$(BACKEND)),src/touch.c src/multitap.c src/update.c src/ps2_run.c src/boxart_net.c)
 OBJ := $(SRC:.c=.o)
 
@@ -54,8 +54,8 @@ src/%.o: src/%.c $(wildcard src/*.h)
 tests/png_dump: tests/png_dump.c src/png.c src/png.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/png_dump.c src/png.c -lz
 
-tests/pad_test: tests/pad_test.c src/platform_sdl2.c src/gfx.c src/touch.c src/multitap.c src/compat.c $(wildcard src/*.h)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/pad_test.c src/platform_sdl2.c src/gfx.c src/touch.c src/multitap.c src/compat.c $(LDLIBS)
+tests/pad_test: tests/pad_test.c src/platform_sdl2.c src/gfx.c src/touch.c src/multitap.c src/compat.c src/crt.c $(wildcard src/*.h)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/pad_test.c src/platform_sdl2.c src/gfx.c src/touch.c src/multitap.c src/compat.c src/crt.c $(LDLIBS)
 
 tests/psx_test: tests/psx_test.c src/psx_run.o src/lr_run.o src/gfx.o src/compat.o $(PSX_OBJ)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/psx_test.c src/psx_run.o src/lr_run.o src/gfx.o src/compat.o $(PSX_OBJ) -lz -lm -lpthread
@@ -64,10 +64,13 @@ tests/ps2_test: tests/ps2_test.c src/ps2_run.o src/lr_run.o src/update.o src/jar
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/ps2_test.c src/ps2_run.o src/lr_run.o src/update.o src/jar.o src/gfx.o \
 	    src/compat.o $(LDLIBS)
 
+tests/crt_test: tests/crt_test.c src/crt.c src/crt.h
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/crt_test.c src/crt.c -lm -lpthread
+
 tests/boxart_test: tests/boxart_test.c src/boxart.o src/media.o src/ttf.o src/png.o src/gfx.o src/compat.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/boxart_test.c src/boxart.o src/media.o src/ttf.o src/png.o src/gfx.o src/compat.o -lz -lm
 
-TEST_BINS := tests/png_dump tests/psx_test tests/boxart_test $(if $(filter sdl2,$(BACKEND)),tests/pad_test tests/ps2_test)
+TEST_BINS := tests/png_dump tests/psx_test tests/boxart_test tests/crt_test $(if $(filter sdl2,$(BACKEND)),tests/pad_test tests/ps2_test)
 
 test: bt-j2me $(TEST_BINS)
 	BT_BACKEND=$(BACKEND) sh tests/run.sh ./bt-j2me
@@ -76,7 +79,7 @@ strip: bt-j2me
 	$(CROSS)strip -s bt-j2me
 
 clean:
-	rm -f bt-j2me bt-j2me.exe src/*.o tests/png_dump tests/pad_test tests/psx_test tests/ps2_test tests/boxart_test
+	rm -f bt-j2me bt-j2me.exe src/*.o tests/png_dump tests/pad_test tests/psx_test tests/ps2_test tests/boxart_test tests/crt_test
 	find $(PSX_DIR) -name "*.o" -delete
 	rm -rf tests/out
 

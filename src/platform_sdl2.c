@@ -1,11 +1,13 @@
 #include "platform.h"
 #include "compat.h"
+#include "crt.h"
 #include "cursor.h"
 #include "multitap.h"
 #include "touch.h"
 #include "util.h"
 
 #include <SDL.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,13 +46,19 @@ static SDL_Rect      game_dst;      /* куда на окне ложится э�
 #define MAX_WIDE 64
 static int           pc_full = 1, pc_scale = -1, pc_mute, pc_loaded, pc_hints = 1;
 static int           pad_lb, pad_rb; /* плечевые зажаты — LB+RB прячет подсказки */
-/* Фильтры картинки игры: цвет меняем в кадре игры, а строки ЭЛТ и сетку ЖК — накладкой поверх. */
-enum { FL_NONE, FL_CRT, FL_COARSE, FL_GAMEBOY, FL_LCD, FL_GRAY, FL_SEPIA, FL_COUNT };
+/* Фильтры картинки игры: цвет меняем в кадре игры, а строки ЭЛТ и сетку ЖК — накладкой поверх.
+ * FL_TUBE — ЭЛТ-кинескоп (crt.c): кадр рисуется заново в разрешении экрана. Новые — только в конец:
+ * номер фильтра хранится в pc.cfg. */
+enum { FL_NONE, FL_CRT, FL_COARSE, FL_GAMEBOY, FL_LCD, FL_GRAY, FL_SEPIA, FL_TUBE, FL_COUNT };
 static int           pc_filter;
 static uint32_t     *filt_px;       /* кадр игры после фильтра */
 static size_t        filt_cap;
 static SDL_Texture  *ov_tex;        /* накладка: строки ЭЛТ или сетка пикселей */
 static int           ov_filter, ov_w, ov_h, ov_k;
+static CrtParams     crt_p;         /* настройки кинескопа — меню «Настроить ЭЛТ» */
+static SDL_Texture  *crt_tex;       /* кадр после кинескопа, (w·kx)×(h·ky) */
+static uint32_t     *crt_buf;
+static int           crt_w, crt_h;
 static char          pc_wide[MAX_WIDE][128];
 static char          pc_latch[MAX_WIDE][128]; /* игры с залипанием стрелок */
 static int           pc_nlatch;
@@ -247,11 +255,76 @@ static const uint32_t *filter_frame(void)
     return d;
 }
 
+static void filter_overlay(const SDL_Rect *dst);
+
+static int tube_on(void)
+{
+    return pc_filter == FL_TUBE && !cursor_mode && screen.px;
+}
+
+/* Кинескоп: сколько экранных пикселей на пиксель игры — по месту, где лежит картинка
+ * (не больше 4: дальше разницы не видно, а работы больше). */
+static void tube_scale(int *kx, int *ky)
+{
+    int dw = game_dst.w, dh = game_dst.h;
+
+    if (touch_on || dw <= 0 || dh <= 0)
+        platform_display_size(&dw, &dh);
+    *kx = dw / screen.w;
+    *ky = dh / screen.h;
+    *kx = *kx < 2 ? 2 : *kx > 4 ? 4 : *kx;
+    *ky = *ky < 2 ? 2 : *ky > 4 ? 4 : *ky;
+}
+
+/* Рисует кадр игры кинескопом в crt_tex. 0 — готово. */
+static int tube_upload(void)
+{
+    int kx, ky, w, h, cpus = SDL_GetCPUCount();
+
+    tube_scale(&kx, &ky);
+    w = screen.w * kx;
+    h = screen.h * ky;
+    if (!crt_tex || w != crt_w || h != crt_h) {
+        uint32_t *b = realloc(crt_buf, (size_t)w * (size_t)h * 4);
+        if (!b)
+            return -1;
+        crt_buf = b;
+        if (crt_tex)
+            SDL_DestroyTexture(crt_tex);
+        /* кинескоп уже нарисован в нужном размере: при подгонке — плавно, а не «лесенкой» */
+        SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
+        crt_tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, w, h);
+        SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
+        if (!crt_tex)
+            return -1;
+        crt_w = w;
+        crt_h = h;
+    }
+    if (crt_render(screen.px, screen.w, screen.h, crt_buf, kx, ky, &crt_p, cpus < 1 ? 1 : cpus > 4 ? 4 : cpus))
+        return -1;
+    SDL_UpdateTexture(crt_tex, NULL, crt_buf, w * (int)sizeof(uint32_t));
+    return 0;
+}
+
 static void upload(void)
 {
-    const uint32_t *p = filter_frame();
+    const uint32_t *p;
 
+    if (tube_on() && tube_upload() == 0)
+        return;
+    p = filter_frame();
     SDL_UpdateTexture(tex, NULL, p ? p : screen.px, screen.w * (int)sizeof(uint32_t));
+}
+
+/* Экран игры в окне: кинескоп или кадр с накладкой фильтра. */
+static void draw_game(const SDL_Rect *dst)
+{
+    if (tube_on() && crt_tex) {
+        SDL_RenderCopy(ren, crt_tex, NULL, dst);
+        return;
+    }
+    SDL_RenderCopy(ren, tex, NULL, dst);
+    filter_overlay(dst);
 }
 
 /* Накладка поверх картинки игры: у ЭЛТ — тёмная строка под каждой строкой игры,
@@ -417,6 +490,13 @@ void platform_shutdown(void)
     if (ov_tex)
         SDL_DestroyTexture(ov_tex);
     ov_tex = NULL;
+    if (crt_tex)
+        SDL_DestroyTexture(crt_tex);
+    crt_tex = NULL;
+    free(crt_buf);
+    crt_buf = NULL;
+    crt_w = crt_h = 0;
+    crt_free();
     if (tex)
         SDL_DestroyTexture(tex);
     if (ren)
@@ -521,12 +601,10 @@ static void render(void)
         int w, h;
         platform_display_size(&w, &h);
         touch_place(w, h, view_w(), screen.h, scale_mode, &dst);
-        SDL_RenderCopy(ren, tex, NULL, &dst);
-        filter_overlay(&dst);
+        draw_game(&dst);
         touch_draw();
     } else {
-        SDL_RenderCopy(ren, tex, NULL, &game_dst);
-        filter_overlay(&game_dst);
+        draw_game(&game_dst);
         if (osk_open)
             osk_draw();
         else if (typing)
@@ -1140,6 +1218,7 @@ static void pc_load(void)
     FILE *f;
 
     pc_loaded = 1;
+    crt_defaults(&crt_p);
     pc_path(path, sizeof(path), 0);
     if (!(f = bt_fopen(path, "rb")))
         return;
@@ -1155,6 +1234,15 @@ static void pc_load(void)
             pc_filter = atoi(line + 7);
         else if (!strncmp(line, "mute ", 5))
             pc_mute = atoi(line + 5) != 0;
+        else if (!strncmp(line, "crt ", 4)) {        /* crt <имя> <значение> — настройка кинескопа */
+            char key[32];
+            float v;
+            int i;
+            if (sscanf(line + 4, "%31s %f", key, &v) == 2)
+                for (i = 0; i < CRT_NPARAM; i++)
+                    if (!strcmp(key, crt_param_info[i].key) && v >= crt_param_info[i].min && v <= crt_param_info[i].max)
+                        crt_p.v[i] = v;
+        }
         else if (!strncmp(line, "size ", 5) && pc_nsize < MAX_WIDE) {
             int w, h, n = 0;
             if (sscanf(line + 5, "%dx%d %n", &w, &h, &n) == 2 && n > 0 && w >= 96 && h >= 64 && w <= 640 && h <= 640) {
@@ -1185,6 +1273,9 @@ static void pc_save(void)
         return;
     fprintf(f, "fullscreen %d\nscale %d\nmute %d\nhints %d\nfilter %d\n", pc_full, pc_scale, pc_mute, pc_hints,
             pc_filter);
+    for (i = 0; i < CRT_NPARAM; i++)
+        if (crt_p.v[i] != crt_param_info[i].def)
+            fprintf(f, "crt %s %.3f\n", crt_param_info[i].key, crt_p.v[i]);
     for (i = 0; i < pc_nwide; i++)
         fprintf(f, "wide %s\n", pc_wide[i]);
     for (i = 0; i < pc_nlatch; i++)
@@ -1278,15 +1369,21 @@ static void set_fullscreen(int on)
 }
 
 /* Пункты меню. */
-enum { MI_RESUME, MI_SAVE, MI_LOAD, MI_RESET, MI_FULL, MI_SCALE, MI_FILTER, MI_SIZE, MI_WIDE, MI_LATCH, MI_SOUND, MI_HINTS, MI_SHOT, MI_EXIT, MI_COUNT };
+enum { MI_RESUME, MI_SAVE, MI_LOAD, MI_RESET, MI_FULL, MI_SCALE, MI_FILTER, MI_CRT, MI_SIZE, MI_WIDE, MI_LATCH, MI_SOUND, MI_HINTS, MI_SHOT, MI_EXIT, MI_COUNT };
+/* Страница «Настройка ЭЛТ»: параметры кинескопа, сброс и назад. */
+#define MI_CRT_PARAM  MI_COUNT                          /* + номер параметра */
+#define MI_CRT_RESET  (MI_COUNT + CRT_NPARAM)
+#define MI_CRT_BACK   (MI_COUNT + CRT_NPARAM + 1)
+#define MENU_ROWS     (MI_COUNT > CRT_NPARAM + 2 ? MI_COUNT : CRT_NPARAM + 2)
 
 #define MENU_W     236
 #define MENU_ROW   18
 #define MENU_TOP   30
-#define MENU_H     (MENU_TOP + MI_COUNT * MENU_ROW + 24)
+#define MENU_H     (MENU_TOP + MENU_ROWS * MENU_ROW + 24)
 
 static int          menu_sel, menu_k, menu_stick;
-static int          menu_vis[MI_COUNT], menu_n;    /* видимые пункты: у NES свои, у J2ME свои */
+static int          menu_vis[MENU_ROWS], menu_n;   /* видимые пункты: у NES свои, у J2ME свои */
+static int          menu_page;                      /* 0 — пауза, 1 — настройка ЭЛТ */
 #define MENU_HN     (MENU_TOP + menu_n * MENU_ROW + 24)
 static Image        menu_img;
 static SDL_Texture *menu_tex;
@@ -1295,11 +1392,19 @@ static SDL_Rect     menu_dst;
 static void menu_label(int i, char *out, size_t cap)
 {
     static const char *const scales[] = { "чёткий", "по размеру", "авто", "растянуть" };
-    static const char *const filters[FL_COUNT] = { "нет", "ЭЛТ", "грубые пиксели", "Game Boy", "ЖК-экран",
-                                                   "ч/б", "сепия" };
+    static const char *const filters[FL_COUNT] = { "нет", "ЭЛТ (строки)", "грубые пиксели", "Game Boy", "ЖК-экран",
+                                                   "ч/б", "сепия", "ЭЛТ-кинескоп" };
     int sc = pc_scale >= 0 ? pc_scale : (int)scale_mode;
 
+    if (i >= MI_CRT_PARAM && i < MI_CRT_RESET) {
+        const CrtParamInfo *pi = &crt_param_info[i - MI_CRT_PARAM];
+        snprintf(out, cap, "%s: %.2f", pi->label, (double)crt_p.v[i - MI_CRT_PARAM]);
+        return;
+    }
     switch (i) {
+    case MI_CRT_RESET: snprintf(out, cap, "Сбросить как было"); break;
+    case MI_CRT_BACK: snprintf(out, cap, "Назад"); break;
+    case MI_CRT:    snprintf(out, cap, "Настроить ЭЛТ…"); break;
     case MI_RESUME: snprintf(out, cap, "Продолжить"); break;
     case MI_SAVE:   snprintf(out, cap, "Сохранить игру"); break;
     case MI_LOAD:   snprintf(out, cap, "Загрузить игру"); break;
@@ -1329,12 +1434,33 @@ static void menu_build(void)
     int i;
 
     menu_n = 0;
+    if (menu_page) {
+        for (i = MI_CRT_PARAM; i <= MI_CRT_BACK; i++)
+            menu_vis[menu_n++] = i;
+        return;
+    }
     for (i = 0; i < MI_COUNT; i++) {
         int nes_only = i == MI_SAVE || i == MI_LOAD || i == MI_RESET;
         int j2me_only = i == MI_SIZE || i == MI_WIDE || i == MI_LATCH;
+        if (i == MI_CRT && pc_filter != FL_TUBE)
+            continue;                   /* настройка — только у кинескопа */
         if (console ? !j2me_only : !nes_only)
             menu_vis[menu_n++] = i;
     }
+}
+
+/* Перейти на страницу меню и встать на пункт item (или на первый). */
+static void menu_goto(int page, int item)
+{
+    int i;
+
+    menu_page = page;
+    menu_build();
+    menu_sel = 0;
+    for (i = 0; i < menu_n; i++)
+        if (menu_vis[i] == item)
+            menu_sel = i;
+    menu_dirty = 1;
 }
 
 static void menu_show(void)
@@ -1342,6 +1468,7 @@ static void menu_show(void)
     if (menu_open)
         return;
     menu_open = 1;
+    menu_page = 0;
     menu_build();
     menu_sel = 0;
     menu_dirty = 1;
@@ -1388,7 +1515,10 @@ static void menu_draw(void)
         gfx_fill(m, 0, 0, MENU_W, MENU_H, 0);
         gfx_fill(m, 0, 0, MENU_W, MENU_HN, 0xF21A1724u);
         gfx_frame(m, 0, 0, MENU_W, MENU_HN, 0xFF3A3450u);
-        gfx_text(m, &font_big, (MENU_W - gfx_text_width(&font_big, "Пауза", 1)) / 2, 7, "Пауза", 0xFFEDE8F2u, 1);
+        {
+            const char *title = menu_page ? "Настройка ЭЛТ" : "Пауза";
+            gfx_text(m, &font_big, (MENU_W - gfx_text_width(&font_big, title, 1)) / 2, 7, title, 0xFFEDE8F2u, 1);
+        }
         gfx_fill(m, 10, MENU_TOP - 4, MENU_W - 20, 1, 0xFF3A3450u);
         for (i = 0; i < menu_n; i++) {
             int y = MENU_TOP + i * MENU_ROW;
@@ -1400,7 +1530,9 @@ static void menu_draw(void)
             gfx_text(m, &font_mid, 14, y + 1, s, i == menu_sel ? 0xFFF4F0FFu : 0xFF8F8899u, 1);
         }
         {   /* внизу — какие кнопки что делают */
-            const char *lg = pads ? "A\tвыбрать\tB\tназад\tView\tзакрыть"
+            const char *lg = menu_page ? (pads ? "A\tвыбрать\t<>\tменять\tB\tназад"
+                                               : "[Enter]\tок\t[<][>]\tменять\t[Esc]\tназад")
+                           : pads ? "A\tвыбрать\tB\tназад\tView\tзакрыть"
                                   : "[Enter]\tок\t[<][>]\tменять\t[Esc]\tзакрыть";
             int lw = gfx_hints(NULL, &font_small, 0, 0, lg, 0);
             gfx_hints(m, &font_small, (MENU_W - lw) / 2, MENU_HN - font_small.h - 7, lg, 0xFF8F8899u);
@@ -1414,9 +1546,11 @@ static void menu_draw(void)
     menu_dst.w = MENU_W * menu_k;
     menu_dst.h = MENU_HN * menu_k;
     menu_dst.x = (dw - menu_dst.w) / 2;
+    if (menu_page)              /* настройка ЭЛТ — сбоку, чтобы картинка была видна */
+        menu_dst.x = dw / 40;
     menu_dst.y = (dh - menu_dst.h) / 2;
     SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
-    SDL_SetRenderDrawColor(ren, 0, 0, 0, 150);  /* игра темнеет под меню */
+    SDL_SetRenderDrawColor(ren, 0, 0, 0, menu_page ? 0 : 150);  /* игра темнеет под меню, кроме настройки ЭЛТ */
     SDL_RenderFillRect(ren, NULL);
     {
         SDL_Rect src = { 0, 0, MENU_W, MENU_HN };
@@ -1445,7 +1579,26 @@ static int menu_hit(int wx, int wy)
 
 static void menu_activate(int dir)
 {
-    switch (menu_vis[menu_sel]) {
+    int item = menu_vis[menu_sel];
+
+    if (item >= MI_CRT_PARAM && item < MI_CRT_RESET) {     /* параметр кинескопа: шаг влево-вправо */
+        const CrtParamInfo *pi = &crt_param_info[item - MI_CRT_PARAM];
+        float *v = &crt_p.v[item - MI_CRT_PARAM];
+        *v += (dir < 0 ? -pi->step : pi->step);
+        if (*v < pi->min)
+            *v = pi->min;
+        if (*v > pi->max)
+            *v = pi->max;
+        if (fabsf(*v - pi->def) < pi->step * 0.01f)
+            *v = pi->def;
+        pc_save();
+        if (tex && screen.px)
+            upload();           /* игра на паузе — сразу показываем на её кадре */
+        menu_dirty = 1;
+        render();
+        return;
+    }
+    switch (item) {
     case MI_RESUME:
         menu_close();
         return;
@@ -1496,8 +1649,21 @@ static void menu_activate(int dir)
     case MI_FILTER:
         pc_filter = (pc_filter + (dir < 0 ? FL_COUNT - 1 : 1)) % FL_COUNT;
         pc_save();
+        menu_goto(0, MI_FILTER);    /* у кинескопа появляется пункт «Настроить ЭЛТ» */
         if (tex && screen.px)
             upload();           /* игра на паузе — перекрашиваем последний её кадр */
+        break;
+    case MI_CRT:
+        menu_goto(1, MI_CRT_PARAM);
+        break;
+    case MI_CRT_RESET:
+        crt_defaults(&crt_p);
+        pc_save();
+        if (tex && screen.px)
+            upload();
+        break;
+    case MI_CRT_BACK:
+        menu_goto(0, MI_CRT);
         break;
     case MI_WIDE: {
         int i = pc_wide_index(pc_game);
@@ -1547,6 +1713,8 @@ static void menu_activate(int dir)
 /* Пункт меняется стрелками влево-вправо. */
 static int menu_toggle(int i)
 {
+    if (i >= MI_CRT_PARAM && i < MI_CRT_RESET)
+        return 1;
     return i == MI_SCALE || i == MI_FILTER || i == MI_SIZE || i == MI_FULL || i == MI_SOUND || i == MI_LATCH || i == MI_HINTS;
 }
 
@@ -1555,6 +1723,17 @@ static void menu_move(int d)
     menu_sel = (menu_sel + d + menu_n) % menu_n;
     menu_dirty = 1;
     render();
+}
+
+/* «Назад»: со страницы настройки ЭЛТ — в паузу, из паузы — в игру. */
+static void menu_back(void)
+{
+    if (menu_page) {
+        menu_goto(0, MI_CRT);
+        render();
+    } else {
+        menu_close();
+    }
 }
 
 /* Ввод, пока меню открыто: 1 — событие съедено. */
@@ -1567,7 +1746,7 @@ static int menu_event(const SDL_Event *e)
         switch (e->key.keysym.sym) {
         case SDLK_ESCAPE: case SDLK_AC_BACK: case SDLK_BACKSPACE:
             if (!e->key.repeat)
-                menu_close();
+                menu_back();
             return 1;
         case SDLK_UP: case SDLK_w: menu_move(-1); return 1;
         case SDLK_DOWN: case SDLK_s: menu_move(1); return 1;
@@ -1599,7 +1778,7 @@ static int menu_event(const SDL_Event *e)
         case SDL_CONTROLLER_BUTTON_DPAD_LEFT: menu_activate(-1); break;
         case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: case SDL_CONTROLLER_BUTTON_A: menu_activate(1); break;
         case SDL_CONTROLLER_BUTTON_B: case SDL_CONTROLLER_BUTTON_BACK: case SDL_CONTROLLER_BUTTON_GUIDE:
-            menu_close();
+            menu_back();
             break;
         }
         return 1;
@@ -1625,7 +1804,7 @@ static int menu_event(const SDL_Event *e)
             menu_sel = i;
             menu_activate(1);
         } else if (e->button.button == SDL_BUTTON_RIGHT) {
-            menu_close();
+            menu_back();
         }
         return 1;
     case SDL_MOUSEBUTTONUP: case SDL_MOUSEWHEEL:

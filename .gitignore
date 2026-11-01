@@ -14,5 +14,6 @@ dist/
 /android/local.properties
 /tests/psx_test
 /tests/boxart_test
+/tests/crt_test
 /tests/*.exe
 /tests/ps2_test
