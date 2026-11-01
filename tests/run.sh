@@ -65,6 +65,7 @@ else
 fi
 
 check "обложки: подбор по названию, носители" 0 "BOXART DONE fails=0" "$DIR/boxart_test"
+check "ЭЛТ-кинескоп: строки, растекание цвета, потоки" 0 "CRT DONE fails=0" "$DIR/crt_test"
 
 # PlayStation: проверочный диск на встроенном HLE-BIOS — картинка, кнопки, сохранения, звук
 DISC="$OUT/psx/shelf/PS1/Test Disc"     # полка смотрит и во вложенные папки
