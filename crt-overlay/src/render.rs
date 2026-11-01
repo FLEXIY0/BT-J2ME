@@ -195,6 +195,12 @@ impl Renderer {
         }
         self.chain = Some(chain);
         self.frame = 0;
+        // glslang / SPIRV-Cross leave tens of MB of freed heap behind;
+        // give it back to the system.
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        unsafe {
+            libc::malloc_trim(0);
+        }
         self.set_lines(self.lines)
     }
 

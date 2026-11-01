@@ -31,9 +31,11 @@ monitor = 0
 # 480 on 4K), like a 240p console on a TV. Fewer lines = bigger "pixels".
 lines = 0
 
-# Renderer: "auto" = full (OpenGL 3.3) if available, otherwise lite
-# (OpenGL 2.1, for old GPUs such as Intel GMA 4500; draws CRT Tube only).
-# "full" or "lite" forces one.
+# Renderer: "auto" = CRT Tube is drawn by the built-in renderer (small, any
+# GPU with OpenGL 2.1+); other presets use librashader (OpenGL 3.3, ~55 MB
+# more RAM). "lite" = CRT Tube with 2 instead of 4 rows per pixel and 30 fps,
+# for weak GPUs (used automatically on OpenGL 2.x). "full" = librashader
+# for every preset, including crt-tube.
 renderer = "auto"
 
 # Frame-rate cap. 0 = follow the monitor refresh rate (vsync); the lite

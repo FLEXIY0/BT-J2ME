@@ -91,7 +91,10 @@ fn render(job: &Job, event_loop: &ActiveEventLoop) -> Result<()> {
     let attrs = Window::default_attributes()
         .with_visible(false)
         .with_inner_size(winit::dpi::PhysicalSize::new(64, 64));
-    let mode = crate::Mode::parse(job.renderer.as_deref().unwrap_or(&cfg.renderer));
+    if let Some(r) = &job.renderer {
+        cfg.renderer = r.clone();
+    }
+    let mode = crate::Mode::for_config(&cfg);
     let (_window, _surface, _context, gl, lite) = crate::create_gl(event_loop, attrs, false, mode)?;
 
     // One image row = one scanline: the "desktop" is the image itself.

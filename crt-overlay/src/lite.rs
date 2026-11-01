@@ -1,14 +1,16 @@
-//! "Lite" renderer for old GPUs that only have OpenGL 2.1 (Intel GMA 4500,
-//! GMA 3150, old Radeon/GeForce...). It does not use librashader; it draws
-//! the CRT Tube look with three small GLSL 1.20 passes:
+//! Own renderer for the CRT Tube look. It does not use librashader (which
+//! with its shader compilers costs ~55 MB of RAM), and runs on anything from
+//! OpenGL 2.1 (Intel GMA 4500, GMA 3150, old Radeon/GeForce) upwards.
+//! Three small GLSL 1.20 passes:
 //!
 //! 1. shrink the desktop to `lines` rows (4x4 box filter in 4 bilinear taps);
 //! 2. at that low resolution, convert to YIQ and blur the colour (I/Q)
 //!    horizontally — the expensive wide filter runs on ~100k pixels only;
-//! 3. at screen resolution: luma beam (6 taps x 2 rows), scanlines whose
-//!    width depends on brightness, aperture grille, colour controls.
+//! 3. at screen resolution: luma beam (6 taps x 4 rows, or x 2 rows in lite
+//!    mode for OpenGL 2.1 GPUs), scanlines whose width depends on
+//!    brightness, aperture grille, colour controls.
 //!
-//! About 14 texture reads per screen pixel instead of 40. The parameter
+//! 14 (lite) or 28 texture reads per screen pixel; crt-tube.slang reads 40. The parameter
 //! defaults are read from crt-tube.slang, so both renderers share one source
 //! of truth and the same `[params]` overrides.
 
@@ -33,7 +35,7 @@ void main() {
 const DOWN_FS: &str = r#"#version 120
 varying vec2 uv;
 uniform sampler2D tex;
-uniform vec2 off;   // a quarter of a destination texel, in uv units
+uniform vec2 off;   // tap offset, in uv units of the source
 void main() {
     vec3 c = texture2D(tex, uv + vec2(-off.x, -off.y)).rgb
            + texture2D(tex, uv + vec2( off.x, -off.y)).rgb
@@ -42,37 +44,46 @@ void main() {
     gl_FragColor = vec4(c * 0.25, 1.0);
 }"#;
 
+// Colour (I/Q) through the wide chroma beam, at 4x horizontal resolution
+// so the tube pass can interpolate it almost exactly. Same taps as
+// crt-tube.slang (-4..+5 around the beam position).
 const PREP_FS: &str = r#"#version 120
 varying vec2 uv;
 uniform sampler2D tex;
-uniform vec2 size;
+uniform vec2 size;   // shader input (low-res desktop) size
 uniform float chroma;
 void main() {
-    vec2 t = floor(uv * size);
-    vec3 c0 = texture2D(tex, (t + 0.5) / size).rgb;
-    float Y = dot(c0, vec3(0.299, 0.587, 0.114));
+    float x = uv.x * size.x;
+    float row = floor(uv.y * size.y);
+    float s = max(chroma, 0.05);
+    float col0 = floor(x - 0.5);
     vec2 iq = vec2(0.0);
     float w = 0.0;
-    float s = max(chroma, 0.05);
-    for (int i = -5; i <= 5; i++) {
-        float x = clamp(t.x + float(i), 0.0, size.x - 1.0);
-        vec3 c = texture2D(tex, vec2(x + 0.5, t.y + 0.5) / size).rgb;
-        float k = exp(-0.5 * float(i * i) / (s * s));
+    for (int i = -4; i <= 5; i++) {
+        float col = col0 + float(i);
+        vec3 c = texture2D(tex, vec2(clamp(col, 0.0, size.x - 1.0) + 0.5, row + 0.5) / size).rgb;
+        float d = (x - (col + 0.5)) / s;
+        float k = exp(-0.5 * d * d);
         iq += k * vec2(dot(c, vec3(0.596, -0.274, -0.322)), dot(c, vec3(0.211, -0.523, 0.312)));
         w += k;
     }
     iq /= w;
-    gl_FragColor = vec4(Y, iq.x / 1.2 + 0.5, iq.y / 1.1 + 0.5, 1.0);
+    gl_FragColor = vec4(iq.x / 1.2 + 0.5, iq.y / 1.1 + 0.5, 0.5, 1.0);
 }"#;
 
-const TUBE_FS: &str = r#"#version 120
+const TUBE_FS: &str = r#"
 varying vec2 uv;
-uniform sampler2D yiq;
+uniform sampler2D tex;      // low-res desktop (luma is computed from it)
+uniform sampler2D chroma_tex; // smeared I/Q at 4x horizontal resolution
 uniform vec2 size;
 uniform vec2 outsize;
 uniform float TUBE_HBEAM, TUBE_WMIN, TUBE_WMAX, TUBE_MASK_PITCH, TUBE_MASK_STR,
               TUBE_CONV_R, TUBE_CONV_B, TUBE_BRIGHT, TUBE_GAIN_R, TUBE_GAIN_B,
               TUBE_GAMMA_IN, TUBE_GAMMA_OUT, TUBE_SAT, TUBE_MASK_PHASE, TUBE_COLOR;
+
+vec2 fetch_iq(float x, float row) {
+    return (texture2D(chroma_tex, vec2(x / size.x, (row + 0.5) / size.y)).rg - 0.5) * vec2(1.2, 1.1) * TUBE_COLOR;
+}
 
 vec3 yiq2rgb(vec3 v) {
     return vec3(v.x + 0.956 * v.y + 0.621 * v.z,
@@ -89,22 +100,31 @@ void main() {
     float row0 = floor(src.y - 0.5);
     float col0 = floor(src.x - 0.5);
     vec3 sum = vec3(0.0);
-    for (int dj = 0; dj <= 1; dj++) {
+    for (int dj = ROW_FIRST; dj <= ROW_LAST; dj++) {
         float row = row0 + float(dj);
         float rowc = clamp(row, 0.0, size.y - 1.0);
         vec3 ys = vec3(0.0);
         vec3 yw = vec3(0.0);
         for (int di = -2; di <= 3; di++) {
             float col = col0 + float(di);
-            float Y = texture2D(yiq, vec2(clamp(col, 0.0, size.x - 1.0) + 0.5, rowc + 0.5) / size).r;
+            float Y = dot(texture2D(tex, vec2(clamp(col, 0.0, size.x - 1.0) + 0.5, rowc + 0.5) / size).rgb,
+                          vec3(0.299, 0.587, 0.114));
             vec3 d = (src.x - shift - (col + 0.5)) / hw;
             vec3 k = exp(-0.5 * d * d);
             ys += k * Y;
             yw += k;
         }
         vec3 Yc = ys / max(yw, vec3(1e-6));
-        vec2 iq = (texture2D(yiq, vec2(src.x, rowc + 0.5) / size).gb - 0.5) * vec2(1.2, 1.1) * TUBE_COLOR;
-        vec3 h = vec3(yiq2rgb(vec3(Yc.r, iq)).r, yiq2rgb(vec3(Yc.g, iq)).g, yiq2rgb(vec3(Yc.b, iq)).b);
+#ifdef PER_GUN_CHROMA
+        vec2 iqR = fetch_iq(src.x - shift.r, rowc);
+        vec2 iqG = fetch_iq(src.x, rowc);
+        vec2 iqB = fetch_iq(src.x - shift.b, rowc);
+#else
+        vec2 iqR = fetch_iq(src.x, rowc);
+        vec2 iqG = iqR;
+        vec2 iqB = iqR;
+#endif
+        vec3 h = vec3(yiq2rgb(vec3(Yc.r, iqR)).r, yiq2rgb(vec3(Yc.g, iqG)).g, yiq2rgb(vec3(Yc.b, iqB)).b);
         h = pow(clamp(h, 0.0, 1.0), vec3(TUBE_GAMMA_IN));
         float dy = src.y - (row + 0.5);
         vec3 w = max(TUBE_WMIN + (TUBE_WMAX - TUBE_WMIN) * sqrt(h), vec3(0.03));
@@ -152,7 +172,7 @@ fn slang_defaults() -> HashMap<String, f32> {
         .collect()
 }
 
-pub struct LiteRenderer {
+pub struct TubeRenderer {
     gl: Arc<glow::Context>,
     pub desktop: Target,
     half: Option<Target>,
@@ -165,18 +185,31 @@ pub struct LiteRenderer {
     tube: glow::Program,
     params: HashMap<String, f32>,
     lines: u32,
+    lite: bool,
 }
 
-impl LiteRenderer {
-    pub fn new(gl: Arc<glow::Context>, capture: (u32, u32), lines: u32) -> Result<Self> {
+impl TubeRenderer {
+    /// `lite`: 2 scanline rows per pixel instead of 4 (for OpenGL 2.1 GPUs).
+    pub fn new(
+        gl: Arc<glow::Context>,
+        capture: (u32, u32),
+        lines: u32,
+        lite: bool,
+    ) -> Result<Self> {
         let down = program(&gl, VS, DOWN_FS).context("lite shrink shader")?;
         let prep = program(&gl, VS, PREP_FS).context("lite colour shader")?;
-        let tube = program(&gl, VS, TUBE_FS).context("lite tube shader")?;
+        let rows = if lite {
+            "#define ROW_FIRST 0\n#define ROW_LAST 1\n"
+        } else {
+            "#define ROW_FIRST -1\n#define ROW_LAST 2\n"
+        };
+        let tube_src = format!("#version 120\n{rows}{TUBE_FS}");
+        let tube = program(&gl, VS, &tube_src).context("tube shader")?;
         let quad = Quad::new(&gl)?;
         let desktop = Target::new(&gl, capture.0, capture.1)?;
         let small = Target::new(&gl, 1, 1)?;
         let yiq = Target::new(&gl, 1, 1)?;
-        let mut r = LiteRenderer {
+        let mut r = TubeRenderer {
             gl,
             desktop,
             half: None,
@@ -189,10 +222,18 @@ impl LiteRenderer {
             tube,
             params: slang_defaults(),
             lines,
+            lite,
         };
         r.set_lines(lines)?;
-        log::info!("lite renderer (OpenGL 2.1 path)");
+        log::info!(
+            "CRT Tube renderer ({})",
+            if lite { "lite, 2 rows" } else { "full quality" }
+        );
         Ok(r)
+    }
+
+    pub fn is_lite(&self) -> bool {
+        self.lite
     }
 
     pub fn gl(&self) -> &glow::Context {
@@ -223,10 +264,10 @@ impl LiteRenderer {
             self.half = Some(Target::new(gl, dw.div_ceil(2), dh.div_ceil(2))?);
         }
         let small = Target::new(gl, w, h)?;
-        let yiq = Target::new(gl, w, h)?;
+        let yiq = Target::new(gl, w * 4, h)?;
         std::mem::replace(&mut self.small, small).destroy(gl);
         std::mem::replace(&mut self.yiq, yiq).destroy(gl);
-        log::info!("lite: shader input {w}x{h}");
+        log::info!("tube: shader input {w}x{h}");
         Ok(())
     }
 
@@ -248,7 +289,6 @@ impl LiteRenderer {
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(src.tex));
             gl.uniform_1_i32(gl.get_uniform_location(prog, "tex").as_ref(), 0);
-            gl.uniform_1_i32(gl.get_uniform_location(prog, "yiq").as_ref(), 0);
             gl.uniform_1_f32(
                 gl.get_uniform_location(prog, "flip").as_ref(),
                 if flip { 1.0 } else { 0.0 },
@@ -256,6 +296,9 @@ impl LiteRenderer {
             setup(gl);
             self.quad.draw(gl);
             gl.use_program(None);
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         }
@@ -268,7 +311,20 @@ impl LiteRenderer {
             .into_iter()
             .flatten()
         {
-            let off = (0.25 / dst.width as f32, 0.25 / dst.height as f32);
+            // Tap offset in source texels for a box filter of `r` texels:
+            // r/4 (exact 4x4 box at r = 4), down to 0 at r = 1 (plain copy).
+            let tap = |r: f32| {
+                if r >= 2.0 {
+                    r / 4.0
+                } else {
+                    (r - 1.0).max(0.0) / 4.0
+                }
+            };
+            let (rx, ry) = (
+                src.width as f32 / dst.width as f32,
+                src.height as f32 / dst.height as f32,
+            );
+            let off = (tap(rx) / src.width as f32, tap(ry) / src.height as f32);
             self.pass(
                 self.down,
                 src,
@@ -292,7 +348,7 @@ impl LiteRenderer {
             self.prep,
             &self.small,
             Some(&self.yiq),
-            (self.small.width, self.small.height),
+            (self.yiq.width, self.yiq.height),
             false,
             |gl| unsafe {
                 gl.uniform_2_f32(
@@ -321,7 +377,12 @@ impl LiteRenderer {
         } else {
             self.output.as_ref()
         };
-        self.pass(self.tube, &self.yiq, dst, size, to_screen, |gl| unsafe {
+        let chroma_tex = self.yiq.tex;
+        self.pass(self.tube, &self.small, dst, size, to_screen, |gl| unsafe {
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, Some(chroma_tex));
+            gl.uniform_1_i32(gl.get_uniform_location(self.tube, "chroma_tex").as_ref(), 1);
+            gl.active_texture(glow::TEXTURE0);
             gl.uniform_2_f32(
                 gl.get_uniform_location(self.tube, "size").as_ref(),
                 size_s.0,
@@ -374,7 +435,7 @@ impl LiteRenderer {
     }
 }
 
-impl Drop for LiteRenderer {
+impl Drop for TubeRenderer {
     fn drop(&mut self) {
         let gl = &self.gl;
         for t in [

@@ -74,6 +74,12 @@ struct App {
 }
 
 fn main() {
+    // One malloc arena per helper thread (tray D-Bus, X11) wastes memory;
+    // the program allocates almost nothing after start-up.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        libc::mallopt(libc::M_ARENA_MAX, 1);
+    }
     init_logging();
     if std::env::args().any(|a| a == "--render-still") {
         if let Err(e) = run() {
@@ -291,7 +297,7 @@ impl ApplicationHandler<UserEvent> for App {
         // its first captured frame is ready.
         // With vsync (max_fps = 0) swap_buffers paces the loop; the limiter at
         // refresh rate + 5% only matters when vsync does not block.
-        // Lite renderer = old hardware: 30 fps unless configured otherwise.
+        // Lite tube renderer = old hardware: 30 fps unless configured otherwise.
         let fps = if self.cfg.max_fps == 0 && o.renderer.is_lite() {
             30.0
         } else if self.cfg.max_fps > 0 {
@@ -435,7 +441,7 @@ impl App {
             event_loop,
             window_attributes(pos, size),
             vsync,
-            Mode::parse(&self.cfg.renderer),
+            Mode::for_config(&self.cfg),
         )?;
         let raw = window.window_handle()?.as_raw();
 
@@ -465,28 +471,34 @@ impl App {
 }
 
 /// Create a window with a current OpenGL 3.3 core context.
-/// Which renderer to use: "auto" tries OpenGL 3.3 (full) and falls back to
-/// OpenGL 2.1 (lite); "full" / "lite" force one.
+/// Which GL context to create. `Core`: OpenGL 3.3 core for librashader,
+/// falling back to a compatibility context. `Compat`: a compatibility
+/// context for the own CRT Tube renderer (works from OpenGL 2.1 up).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Mode {
-    Auto,
-    Full,
-    Lite,
+    Core,
+    Compat,
 }
 
 impl Mode {
-    pub fn parse(s: &str) -> Mode {
-        match s {
-            "full" => Mode::Full,
-            "lite" => Mode::Lite,
-            _ => Mode::Auto,
+    pub fn for_config(cfg: &Config) -> Mode {
+        if gfx::Gfx::needs_librashader(cfg) {
+            Mode::Core
+        } else {
+            Mode::Compat
         }
     }
 }
 
 /// Window, its surface, the current context, the GL function table and
 /// whether the lite (OpenGL 2.1) renderer has to be used.
-pub type GlWindowParts = (Window, Surface<WindowSurface>, PossiblyCurrentContext, Arc<glow::Context>, bool);
+pub type GlWindowParts = (
+    Window,
+    Surface<WindowSurface>,
+    PossiblyCurrentContext,
+    Arc<glow::Context>,
+    bool,
+);
 
 /// Create a window with a current OpenGL context. Returns `lite = true`
 /// when only an OpenGL 2.1 context is used.
@@ -523,21 +535,18 @@ pub fn create_gl(
         .with_profile(GlProfile::Compatibility)
         .build(Some(raw));
     let (context, lite) = match mode {
-        Mode::Lite => (
+        // Own tube renderer: a compatibility context; drivers hand out the
+        // highest version they support (2.1 on GMA 4500, 4.x elsewhere).
+        Mode::Compat => (
             unsafe { display.create_context(&gl_config, &compat21) }
-                .context("create OpenGL 2.1 context")?,
+                .context("create OpenGL context")?,
             true,
         ),
-        Mode::Full => (
-            unsafe { display.create_context(&gl_config, &core33) }
-                .context("create OpenGL 3.3 context")?,
-            false,
-        ),
-        Mode::Auto => match unsafe { display.create_context(&gl_config, &core33) } {
+        Mode::Core => match unsafe { display.create_context(&gl_config, &core33) } {
             Ok(c) => (c, false),
             Err(e) => {
                 log::warn!(
-                    "OpenGL 3.3 is not available ({e}); using the lite renderer (OpenGL 2.1)"
+                    "OpenGL 3.3 is not available ({e}); falling back to CRT Tube on OpenGL 2.1"
                 );
                 (
                     unsafe { display.create_context(&gl_config, &compat21) }

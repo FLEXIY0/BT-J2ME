@@ -1,36 +1,42 @@
-//! The two renderers behind one interface: the full librashader path
-//! (OpenGL 3.3, any .slangp preset) and the lite path (OpenGL 2.1, CRT Tube).
+//! The two renderers behind one interface: our own CRT Tube renderer
+//! (OpenGL 2.1+, small) and librashader for any other .slangp preset
+//! (OpenGL 3.3).
 
 use crate::config::Config;
-use crate::lite::LiteRenderer;
+use crate::lite::TubeRenderer;
 use crate::render::{Renderer, Target};
 use anyhow::Result;
 use std::sync::Arc;
 
 pub enum Gfx {
     Full(Box<Renderer>),
-    Lite(LiteRenderer),
+    Tube(TubeRenderer),
 }
 
 impl Gfx {
+    /// `compat`: the context is a compatibility one (created for the tube
+    /// renderer, or because OpenGL 3.3 core is not available).
     pub fn new(
         gl: Arc<glow::Context>,
-        lite: bool,
+        compat: bool,
         capture: (u32, u32),
         window: (u32, u32),
         cfg: &Config,
     ) -> Result<Gfx> {
         let lines = cfg.effective_lines(capture.1);
-        if lite {
+        if compat {
             if cfg.preset != "crt-tube" {
                 log::warn!(
-                    "lite renderer only draws CRT Tube; preset '{}' ignored",
+                    "OpenGL 3.3 is not available: preset '{}' replaced by CRT Tube",
                     cfg.preset
                 );
             }
-            let mut r = LiteRenderer::new(gl, capture, lines)?;
+            let v = glow::HasContext::version(&*gl);
+            let lite = cfg.renderer == "lite" || (v.major, v.minor) < (3, 0);
+            let mut r = TubeRenderer::new(gl, capture, lines, lite)?;
             r.set_params(&cfg.params);
-            return Ok(Gfx::Lite(r));
+            trim_heap();
+            return Ok(Gfx::Tube(r));
         }
         let mut r = Renderer::new(gl, capture, window, lines)?;
         if let Err(e) = crate::load_preset(&mut r, cfg) {
@@ -39,28 +45,34 @@ impl Gfx {
         Ok(Gfx::Full(Box::new(r)))
     }
 
+    /// Whether librashader is needed: any preset but crt-tube, or forced.
+    pub fn needs_librashader(cfg: &Config) -> bool {
+        cfg.renderer == "full" || cfg.preset != "crt-tube"
+    }
+
+    /// The 2-row tube renderer for weak GPUs (30 fps by default).
     pub fn is_lite(&self) -> bool {
-        matches!(self, Gfx::Lite(_))
+        matches!(self, Gfx::Tube(r) if r.is_lite())
     }
 
     pub fn gl(&self) -> &glow::Context {
         match self {
             Gfx::Full(r) => r.gl(),
-            Gfx::Lite(r) => r.gl(),
+            Gfx::Tube(r) => r.gl(),
         }
     }
 
     pub fn desktop(&self) -> &Target {
         match self {
             Gfx::Full(r) => &r.desktop,
-            Gfx::Lite(r) => &r.desktop,
+            Gfx::Tube(r) => &r.desktop,
         }
     }
 
     pub fn set_lines(&mut self, lines: u32) -> Result<()> {
         match self {
             Gfx::Full(r) => r.set_lines(lines),
-            Gfx::Lite(r) => r.set_lines(lines),
+            Gfx::Tube(r) => r.set_lines(lines),
         }
     }
 
@@ -68,7 +80,7 @@ impl Gfx {
     pub fn reload(&mut self, cfg: &Config) -> Result<()> {
         match self {
             Gfx::Full(r) => crate::load_preset(r, cfg),
-            Gfx::Lite(r) => {
+            Gfx::Tube(r) => {
                 r.set_params(&cfg.params);
                 Ok(())
             }
@@ -90,28 +102,36 @@ impl Gfx {
     pub fn draw(&mut self, size: (u32, u32)) -> Result<()> {
         match self {
             Gfx::Full(r) => r.draw(size),
-            Gfx::Lite(r) => r.draw(size),
+            Gfx::Tube(r) => r.draw(size),
         }
     }
 
     pub fn draw_offscreen(&mut self, size: (u32, u32)) -> Result<()> {
         match self {
             Gfx::Full(r) => r.draw_offscreen(size),
-            Gfx::Lite(r) => r.draw_offscreen(size),
+            Gfx::Tube(r) => r.draw_offscreen(size),
         }
     }
 
     pub fn read_output(&self) -> Vec<u8> {
         match self {
             Gfx::Full(r) => r.read_output(),
-            Gfx::Lite(r) => r.read_output(),
+            Gfx::Tube(r) => r.read_output(),
         }
     }
 
     pub fn gpu_ms(&self) -> Option<f64> {
         match self {
             Gfx::Full(r) => r.gpu_ms(),
-            Gfx::Lite(_) => None,
+            Gfx::Tube(_) => None,
         }
+    }
+}
+
+/// Return freed heap (shader compiler garbage) to the system.
+pub fn trim_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        libc::malloc_trim(0);
     }
 }
